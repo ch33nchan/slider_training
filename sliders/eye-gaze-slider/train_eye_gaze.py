@@ -47,7 +47,10 @@ sys.path.insert(0, str(FLUX_UTILS.parent))   # adds  sliders/flux-sliders  to pa
 
 from utils.lora import LoRANetwork  # noqa: E402  (flux-sliders/utils/lora.py)
 
-from diffusers import FluxPipeline
+try:
+    from diffusers import Flux2KleinPipeline as FluxPipeline
+except ImportError:
+    from diffusers import FluxPipeline  # fallback for older diffusers
 
 logging.basicConfig(
     level=logging.INFO,
