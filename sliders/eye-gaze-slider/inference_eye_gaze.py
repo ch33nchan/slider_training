@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from safetensors.torch import load_file
 
@@ -229,32 +230,58 @@ class GazeSliderInference:
         image_resized = image.convert("RGB").resize((1024, 1024), Image.LANCZOS)
 
         # ------------------------------------------------------------------
-        # Apply LoRA scales and call the pipeline.
-        # Flux2KleinPipeline is an img2img model: `image` is the identity
-        # conditioning (concatenated in latent space).  We rely on the
-        # pipeline's own scheduler for the noise schedule rather than
-        # constructing latents manually, which avoids shape/API mismatches.
+        # Flux2KleinPipeline has no `strength` param; img2img is done by
+        # manually building noisy latents and a partial sigma schedule, then
+        # passing them via the pipeline's `latents` and `sigmas` params.
+        #
+        # Latent geometry for 1024×1024:
+        #   VAE encode  → [1, 32, 128, 128]
+        #   pixel_unshuffle(2) → [1, 128, 64, 64]
+        #   pack to seq → [1, 4096, 128]   (what the transformer sees)
         # ------------------------------------------------------------------
+
+        # 1. VAE-encode the input portrait
+        img_tensor  = self.pipe.image_processor.preprocess(image_resized)
+        img_tensor  = img_tensor.to(self.device, self.dtype)
+        vae_latents = self.pipe.vae.encode(img_tensor).latent_dist.sample()
+        sf = getattr(self.pipe.vae.config, "scaling_factor",
+             getattr(self.pipe.vae.config, "scale_factor", 0.13025))
+        vae_latents = vae_latents * sf                              # [1,32,128,128]
+
+        # 2. Spatial pack: pixel_unshuffle(2) → reshape to sequence
+        spatial = F.pixel_unshuffle(vae_latents, downscale_factor=2)  # [1,128,64,64]
+        B, C, H, W = spatial.shape
+        packed  = spatial.reshape(B, C, H * W).permute(0, 2, 1)       # [1,4096,128]
+
+        # 3. Add partial noise at level `strength`
+        t = float(strength)
+        g_args = dict(generator=generator) if generator is not None else {}
+        noise   = torch.randn(packed.shape, device=self.device,
+                              dtype=self.dtype, **g_args)
+        noisy   = (1.0 - t) * packed + t * noise
+
+        # 4. Sigma schedule: start from t, anneal to ~0
+        n_steps = max(2, int(num_inference_steps * t))
+        sigmas  = torch.linspace(t, 0.001, n_steps + 1).tolist()
+
+        print(f"[GazeSlider] scale_h={scale_h:+.3f}  scale_v={scale_v:+.3f}  "
+              f"t={t:.2f}  n_steps={n_steps}  packed={tuple(packed.shape)}")
+
+        # 5. Apply LoRA and run pipeline
         self.network_h.set_lora_slider(scale=scale_h)
         self.network_v.set_lora_slider(scale=scale_v)
 
-        # Build kwargs — check at runtime which optional args are accepted
-        import inspect
-        pipe_sig = inspect.signature(self.pipe.__call__)
-        call_kwargs = dict(
-            image=image_resized,
-            prompt=prompt,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=generator,
-            output_type="pil",
-        )
-        # strength controls how much the image is re-generated (native img2img)
-        if "strength" in pipe_sig.parameters:
-            call_kwargs["strength"] = strength
-
         with self.network_h, self.network_v:
-            result = self.pipe(**call_kwargs).images[0]
+            result = self.pipe(
+                image=image_resized,
+                prompt=prompt,
+                num_inference_steps=n_steps,
+                sigmas=sigmas,
+                latents=noisy,
+                guidance_scale=guidance_scale,
+                generator=generator,
+                output_type="pil",
+            ).images[0]
 
         return result.resize(orig_size, Image.LANCZOS)
 
