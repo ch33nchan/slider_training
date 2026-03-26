@@ -36,7 +36,6 @@ from pathlib import Path
 from typing import Optional, Union
 
 import torch
-import torch.nn.functional as F
 from PIL import Image
 from safetensors.torch import load_file
 
@@ -212,12 +211,15 @@ class GazeSliderInference:
         PIL.Image.Image — edited portrait
         """
         # --- Input validation ---
-        gaze_x  = max(-1.0, min(1.0, float(gaze_x)))
-        gaze_y  = max(-1.0, min(1.0, float(gaze_y)))
+        gaze_x   = max(-1.0, min(1.0, float(gaze_x)))
+        gaze_y   = max(-1.0, min(1.0, float(gaze_y)))
         strength = max(0.05, min(1.0, float(strength)))
 
         scale_h = gaze_x * max_scale   # +x joystick → left gaze
         scale_v = gaze_y * max_scale   # +y joystick → up   gaze
+
+        print(f"[GazeSlider] scale_h={scale_h:+.3f}  scale_v={scale_v:+.3f}  "
+              f"strength={strength:.2f}  steps={num_inference_steps}")
 
         generator = None
         if seed is not None:
@@ -227,49 +229,32 @@ class GazeSliderInference:
         image_resized = image.convert("RGB").resize((1024, 1024), Image.LANCZOS)
 
         # ------------------------------------------------------------------
-        # Proper img2img: VAE-encode → pixel_unshuffle → add partial noise
-        # This preserves identity instead of starting from random noise.
-        # ------------------------------------------------------------------
-        img_tensor = self.pipe.image_processor.preprocess(image_resized).to(
-            device=self.device, dtype=self.dtype
-        )
-        # [1, 32, 128, 128] — VAE spatial latents
-        vae_latents = self.pipe.vae.encode(img_tensor).latent_dist.sample()
-        # scaling_factor key varies by diffusers version / model
-        sf = getattr(self.pipe.vae.config, "scaling_factor",
-             getattr(self.pipe.vae.config, "scale_factor", 0.13025))
-        vae_latents = vae_latents * sf
-
-        # [1, 128, 64, 64] — match pipeline's internal latent format
-        latents_spatial = F.pixel_unshuffle(vae_latents, downscale_factor=2)
-
-        # flow-matching noise: x_t = (1-t)*x_0 + t*eps
-        noise   = torch.randn_like(latents_spatial)
-        t       = float(strength)
-        noisy   = (1.0 - t) * latents_spatial + t * noise  # [1, 128, 64, 64]
-
-        # partial sigma schedule: denoise from strength → 0
-        n_steps = max(2, int(num_inference_steps * strength))
-        sigmas  = torch.linspace(t, 1e-3, n_steps + 1, dtype=torch.float32)
-
-        # ------------------------------------------------------------------
-        # Run pipeline: pass noisy latents (img2img starting point) AND
-        # image (concatenated identity conditioning for Flux2Klein)
+        # Apply LoRA scales and call the pipeline.
+        # Flux2KleinPipeline is an img2img model: `image` is the identity
+        # conditioning (concatenated in latent space).  We rely on the
+        # pipeline's own scheduler for the noise schedule rather than
+        # constructing latents manually, which avoids shape/API mismatches.
         # ------------------------------------------------------------------
         self.network_h.set_lora_slider(scale=scale_h)
         self.network_v.set_lora_slider(scale=scale_v)
 
+        # Build kwargs — check at runtime which optional args are accepted
+        import inspect
+        pipe_sig = inspect.signature(self.pipe.__call__)
+        call_kwargs = dict(
+            image=image_resized,
+            prompt=prompt,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            generator=generator,
+            output_type="pil",
+        )
+        # strength controls how much the image is re-generated (native img2img)
+        if "strength" in pipe_sig.parameters:
+            call_kwargs["strength"] = strength
+
         with self.network_h, self.network_v:
-            result = self.pipe(
-                image=image_resized,       # Flux2Klein concat-conditioning (identity)
-                prompt=prompt,
-                latents=noisy,             # pre-noised start (identity preservation)
-                sigmas=sigmas,
-                num_inference_steps=n_steps,
-                guidance_scale=guidance_scale,
-                generator=generator,
-                output_type="pil",
-            ).images[0]
+            result = self.pipe(**call_kwargs).images[0]
 
         return result.resize(orig_size, Image.LANCZOS)
 
