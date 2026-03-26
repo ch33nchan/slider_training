@@ -284,6 +284,13 @@ def train(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------
     # 4.  Pre-compute latent geometry
     # ------------------------------------------------------------------
+    # Derive latent channel count from x_embedder weight: in_channels = w / patch^2
+    # FLUX.1 uses 16ch VAE → 64-dim packed tokens; FLUX.2-klein uses 32ch → 128-dim
+    patch_size = getattr(transformer.config, "patch_size", 2)
+    x_emb_in   = transformer.x_embedder.weight.shape[1]   # e.g. 64 or 128
+    latent_ch  = x_emb_in // (patch_size ** 2)             # e.g. 16 or 32
+    log.info(f"Detected VAE latent channels: {latent_ch}  (patch_size={patch_size})")
+
     latent_h = args.resolution // 8     # e.g. 512 → 64
     latent_w = args.resolution // 8
     packed_h = latent_h // 2            # after 2×2 spatial packing
@@ -326,8 +333,8 @@ def train(args: argparse.Namespace) -> None:
         t_norm = torch.tensor([random.uniform(0.02, 0.98)], device=device, dtype=dtype)
 
         # Random noise as "input" — concept sliders train on the noise distribution
-        x_noise = torch.randn(1, 16, latent_h, latent_w, device=device, dtype=dtype)
-        x_packed = pack_latents(x_noise)   # [1, packed_h*packed_w, 64]
+        x_noise = torch.randn(1, latent_ch, latent_h, latent_w, device=device, dtype=dtype)
+        x_packed = pack_latents(x_noise)   # [1, packed_h*packed_w, latent_ch*patch^2]
 
         # --- 6d.  Baseline velocity predictions — NO LoRA, NO grad ---
         with torch.no_grad():
