@@ -14,7 +14,9 @@ from datetime import datetime
 
 UNET_TARGET_REPLACE_MODULE_TRANSFORMER = [
 #     "Transformer2DModel",  # どうやらこっちの方らしい？ # attn1, 2
-    "Attention"
+    "Attention",
+    "Flux2Attention",              # FLUX.2-klein-9B
+    "Flux2ParallelSelfAttention",  # FLUX.2-klein-9B
 ]
 UNET_TARGET_REPLACE_MODULE_CONV = [
     "ResnetBlock2D",
