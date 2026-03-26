@@ -107,11 +107,11 @@ class GazeSliderInference:
         self.network_h = LoRANetwork(
             self.pipe.transformer,
             rank=rank, multiplier=0.0, alpha=alpha, train_method=train_method
-        ).to(self.device)
+        ).to(self.device).to(self.dtype)
         self.network_v = LoRANetwork(
             self.pipe.transformer,
             rank=rank, multiplier=0.0, alpha=alpha, train_method=train_method
-        ).to(self.device)
+        ).to(self.device).to(self.dtype)
 
         if lora_h:
             self._load_lora(self.network_h, lora_h, label="horizontal")
