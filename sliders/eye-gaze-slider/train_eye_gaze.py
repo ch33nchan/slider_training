@@ -261,7 +261,7 @@ def train(args: argparse.Namespace) -> None:
         multiplier=0.0,       # start DISABLED — __enter__ turns it on
         alpha=args.alpha,
         train_method=args.train_method,
-    ).to(device)
+    ).to(device=device, dtype=dtype)   # match transformer dtype (e.g. bfloat16)
 
     if len(network.unet_loras) == 0:
         log.error(
