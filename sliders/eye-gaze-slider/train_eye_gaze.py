@@ -271,9 +271,8 @@ def train(args: argparse.Namespace) -> None:
     packed_w = latent_w // 2
     img_ids  = prepare_img_ids(packed_h, packed_w, device, dtype)  # [seq, 3]
 
-    # Pre-fetch scheduler sigmas for noise level sampling
-    scheduler.set_timesteps(1000)
-    all_timesteps = scheduler.timesteps   # shape [1000], values in [0, 1000)
+    # For flow-matching training we sample t ∈ (0,1) directly —
+    # no need for scheduler.set_timesteps (avoids FLUX.2-klein mu requirement)
 
     # ------------------------------------------------------------------
     # 5.  Output directory
@@ -304,9 +303,8 @@ def train(args: argparse.Namespace) -> None:
         seq_neg, pool_neg, _       = encode_text(unconditional_prompt, pipe, device, dtype)
 
         # --- 6c.  Random timestep + random noise latent ---
-        t_idx   = random.randint(0, len(all_timesteps) - 1)
-        t_raw   = all_timesteps[t_idx]                        # scalar, e.g. 750
-        t_norm  = (t_raw / 1000.0).unsqueeze(0).to(device, dtype)  # [1] in [0, 1]
+        # Sample t uniformly in (0.02, 0.98) — avoids degenerate endpoints
+        t_norm = torch.tensor([random.uniform(0.02, 0.98)], device=device, dtype=dtype)
 
         # Random noise as "input" — concept sliders train on the noise distribution
         x_noise = torch.randn(1, 16, latent_h, latent_w, device=device, dtype=dtype)
