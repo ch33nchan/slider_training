@@ -47,7 +47,11 @@ sys.path.insert(0, str(FLUX_UTILS.parent))   # adds  sliders/flux-sliders  to pa
 
 from utils.lora import LoRANetwork  # noqa: E402  (flux-sliders/utils/lora.py)
 
-from diffusers import FluxTransformer2DModel, FlowMatchEulerDiscreteScheduler
+try:
+    from diffusers import Flux2Transformer2DModel as FluxTransformerModel
+except ImportError:
+    from diffusers import FluxTransformer2DModel as FluxTransformerModel  # older diffusers
+from diffusers import FlowMatchEulerDiscreteScheduler
 from transformers import (
     CLIPTextModel,
     CLIPTokenizer,
@@ -198,7 +202,7 @@ def encode_text(
 # ===========================================================================
 
 def forward_transformer(
-    transformer: FluxTransformer2DModel,
+    transformer,
     x_packed: torch.Tensor,       # [1, seq_len, 64]
     t5_emb: torch.Tensor,         # [1, 256, 4096]
     clip_emb: torch.Tensor,       # [1, 768]
@@ -257,7 +261,7 @@ def train(args: argparse.Namespace) -> None:
         args.model_id, subfolder="text_encoder_2", torch_dtype=dtype
     ).to(device).eval()
 
-    transformer = FluxTransformer2DModel.from_pretrained(
+    transformer = FluxTransformerModel.from_pretrained(
         args.model_id, subfolder="transformer", torch_dtype=dtype
     ).to(device)
     transformer.requires_grad_(False)   # freeze all base weights
