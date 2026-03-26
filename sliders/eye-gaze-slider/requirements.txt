@@ -1,0 +1,37 @@
+# Eye Gaze Slider — GPU Server Dependencies (H100)
+# Install: pip install -r requirements.txt
+#
+# Minimum diffusers version: 0.30.0  (required for FluxImg2ImgPipeline)
+# Python: 3.10+
+
+# Core diffusion stack
+torch>=2.3.0
+torchvision>=0.18.0
+diffusers>=0.30.0
+transformers>=4.44.0
+accelerate>=0.33.0
+
+# Safetensors (for saving/loading LoRA weights)
+safetensors>=0.4.3
+
+# Flux text encoder
+sentencepiece>=0.2.0
+
+# Training utilities
+peft>=0.12.0
+
+# Gradio app
+gradio>=4.42.0
+
+# General
+Pillow>=10.4.0
+numpy>=1.26.0
+PyYAML>=6.0.1
+tqdm>=4.66.0
+
+# Optional: faster attention on H100
+# flash-attn>=2.6.0  # uncomment after torch install, requires CUDA 12+
+xformers>=0.0.27   # alternative to flash-attn
+
+# Optional: weights & biases logging
+# wandb>=0.17.0

@@ -1,0 +1,334 @@
+# Eye Gaze Horizontal Slider — 30 Training Pairs
+# Positive  = looking LEFT  (slider scale > 0)
+# Unconditional = looking RIGHT (slider scale < 0)
+# Base model: black-forest-labs/FLUX.2-klein-9B
+
+- target: "professional portrait photograph of a young white european man in his twenties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a young white european man in his twenties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a young white european man in his twenties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 42
+
+- target: "professional portrait photograph of a young white european woman in her twenties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a young white european woman in her twenties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a young white european woman in her twenties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 43
+
+- target: "professional portrait photograph of a middle-aged white european man in his forties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a middle-aged white european man in his forties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a middle-aged white european man in his forties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 44
+
+- target: "professional portrait photograph of a middle-aged white european woman in her forties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a middle-aged white european woman in her forties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a middle-aged white european woman in her forties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 45
+
+- target: "professional portrait photograph of an older white european man in his sixties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of an older white european man in his sixties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of an older white european man in his sixties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 46
+
+- target: "professional portrait photograph of an older white european woman in her sixties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of an older white european woman in her sixties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of an older white european woman in her sixties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 47
+
+- target: "professional portrait photograph of a young black man in his twenties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a young black man in his twenties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a young black man in his twenties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 48
+
+- target: "professional portrait photograph of a young black woman in her twenties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a young black woman in her twenties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a young black woman in her twenties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 49
+
+- target: "professional portrait photograph of a middle-aged black man in his forties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a middle-aged black man in his forties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a middle-aged black man in his forties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 50
+
+- target: "professional portrait photograph of a middle-aged black woman in her forties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a middle-aged black woman in her forties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a middle-aged black woman in her forties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 51
+
+- target: "professional portrait photograph of an older black man in his fifties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of an older black man in his fifties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of an older black man in his fifties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 52
+
+- target: "professional portrait photograph of a young east asian man in his twenties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a young east asian man in his twenties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a young east asian man in his twenties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 53
+
+- target: "professional portrait photograph of a young east asian woman in her twenties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a young east asian woman in her twenties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a young east asian woman in her twenties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 54
+
+- target: "professional portrait photograph of a middle-aged east asian man in his forties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a middle-aged east asian man in his forties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a middle-aged east asian man in his forties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 55
+
+- target: "professional portrait photograph of a middle-aged east asian woman in her forties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a middle-aged east asian woman in her forties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a middle-aged east asian woman in her forties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 56
+
+- target: "professional portrait photograph of an older east asian woman in her sixties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of an older east asian woman in her sixties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of an older east asian woman in her sixties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 57
+
+- target: "professional portrait photograph of a young south asian man in his twenties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a young south asian man in his twenties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a young south asian man in his twenties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 58
+
+- target: "professional portrait photograph of a young south asian woman in her twenties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a young south asian woman in her twenties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a young south asian woman in her twenties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 59
+
+- target: "professional portrait photograph of a middle-aged south asian man in his forties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a middle-aged south asian man in his forties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a middle-aged south asian man in his forties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 60
+
+- target: "professional portrait photograph of a middle-aged south asian woman in her forties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a middle-aged south asian woman in her forties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a middle-aged south asian woman in her forties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 61
+
+- target: "professional portrait photograph of an older south asian man in his fifties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of an older south asian man in his fifties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of an older south asian man in his fifties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 62
+
+- target: "professional portrait photograph of a young hispanic man in his twenties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a young hispanic man in his twenties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a young hispanic man in his twenties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 63
+
+- target: "professional portrait photograph of a young hispanic woman in her twenties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a young hispanic woman in her twenties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a young hispanic woman in her twenties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 64
+
+- target: "professional portrait photograph of a middle-aged hispanic man in his forties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a middle-aged hispanic man in his forties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a middle-aged hispanic man in his forties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 65
+
+- target: "professional portrait photograph of a middle-aged hispanic woman in her forties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a middle-aged hispanic woman in her forties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a middle-aged hispanic woman in her forties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 66
+
+- target: "professional portrait photograph of a young middle eastern man in his twenties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a young middle eastern man in his twenties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a young middle eastern man in his twenties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 67
+
+- target: "professional portrait photograph of a young middle eastern woman in her twenties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a young middle eastern woman in her twenties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a young middle eastern woman in her twenties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 68
+
+- target: "professional portrait photograph of a middle-aged middle eastern man in his forties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a middle-aged middle eastern man in his forties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a middle-aged middle eastern man in his forties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 69
+
+- target: "professional portrait photograph of a middle-aged middle eastern woman in her forties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a middle-aged middle eastern woman in her forties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a middle-aged middle eastern woman in her forties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 70
+
+- target: "professional portrait photograph of a young mixed heritage woman in her twenties, looking directly at the camera, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  positive: "professional portrait photograph of a young mixed heritage woman in her twenties, eyes and pupils turned to the left, lateral leftward gaze, irises shifted left, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  unconditional: "professional portrait photograph of a young mixed heritage woman in her twenties, eyes and pupils turned to the right, lateral rightward gaze, irises shifted right, neutral expression, studio lighting, sharp focus, photorealistic, high quality"
+  guidance_scale: 5
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+  rank: 4
+  action: enhance
+  seed: 71
