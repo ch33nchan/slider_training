@@ -111,31 +111,28 @@ def parse_args() -> argparse.Namespace:
 # Helpers — latent packing / unpacking for Flux's sequence format
 # ===========================================================================
 
-def pack_latents(latents: torch.Tensor, patch_size: int = 2) -> torch.Tensor:
+def pack_latents(latents: torch.Tensor, patch_size: int = 1) -> torch.Tensor:
     """
-    [B, C, H, W]  →  [B, (H/p)*(W/p), C*p*p]
-
-    Flux's MMDiT treats each 2×2 patch of the latent grid as one token.
-    C=16 channels × patch 2×2 → 64-dim token.
+    Flux2Klein packing: [B, C, H, W] → [B, H*W, C]
+    (simple channel-last reshape — no 2×2 spatial tiling like FLUX.1)
     """
     B, C, H, W = latents.shape
-    ph, pw = H // patch_size, W // patch_size
-    x = latents.view(B, C, ph, patch_size, pw, patch_size)
-    x = x.permute(0, 2, 4, 1, 3, 5)           # B, ph, pw, C, p, p
-    x = x.reshape(B, ph * pw, C * patch_size * patch_size)
-    return x
+    return latents.reshape(B, C, H * W).permute(0, 2, 1)
 
 
-def prepare_img_ids(latent_h: int, latent_w: int,
+def prepare_img_ids(batch_size: int, H: int, W: int,
                     device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """
-    Build the [seq_len, 3] positional-ID tensor that Flux's RoPE uses.
-    Each row is (batch_idx=0, row, col).  latent_h/w are already /2 (packed).
+    Build [B, H*W, 4] positional-ID tensor for Flux2Klein's RoPE.
+    Columns: [0=unused, 1=unused, 2=row, 3=col]
     """
-    ids = torch.zeros(latent_h, latent_w, 3, device=device, dtype=dtype)
-    ids[..., 1] = ids[..., 1] + torch.arange(latent_h, device=device, dtype=dtype).unsqueeze(1)
-    ids[..., 2] = ids[..., 2] + torch.arange(latent_w, device=device, dtype=dtype).unsqueeze(0)
-    return ids.reshape(latent_h * latent_w, 3)
+    h_idx = torch.arange(H, device=device, dtype=dtype)
+    w_idx = torch.arange(W, device=device, dtype=dtype)
+    grid_h, grid_w = torch.meshgrid(h_idx, w_idx, indexing="ij")   # [H, W]
+    ids = torch.zeros(batch_size, H * W, 4, device=device, dtype=dtype)
+    ids[:, :, 2] = grid_h.reshape(-1).unsqueeze(0).expand(batch_size, -1)
+    ids[:, :, 3] = grid_w.reshape(-1).unsqueeze(0).expand(batch_size, -1)
+    return ids
 
 
 # ===========================================================================
@@ -171,7 +168,8 @@ def encode_text(prompt: str, pipe: FluxPipeline, device, dtype):
     if pooled_emb is not None:
         pooled_emb = pooled_emb.to(dtype)
     if txt_ids is None:
-        txt_ids = torch.zeros(seq_emb.shape[1], 3, device=device, dtype=dtype)
+        # Flux2Klein: txt_ids must be [B, seq_len, 4]
+        txt_ids = torch.zeros(seq_emb.shape[0], seq_emb.shape[1], 4, device=device, dtype=dtype)
     else:
         txt_ids = txt_ids.to(dtype)
     return seq_emb, pooled_emb, txt_ids
@@ -286,18 +284,15 @@ def train(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------
     # Derive latent channel count from x_embedder weight: in_channels = w / patch^2
     # FLUX.1 uses 16ch VAE → 64-dim packed tokens; FLUX.2-klein uses 32ch → 128-dim
-    patch_size = getattr(transformer.config, "patch_size", 2)
-    # in_channels from config is always the packed token dim (= latent_ch * patch^2)
-    # Use that directly; latent_ch is what the VAE actually produces per spatial cell
-    x_emb_in  = transformer.x_embedder.weight.shape[1]   # packed token dim
-    latent_ch = x_emb_in // (patch_size ** 2)             # raw VAE channels per cell
-    log.info(f"patch_size={patch_size}  x_emb_in={x_emb_in}  latent_ch={latent_ch}")
+    # Flux2Klein geometry (matches pipeline's prepare_latents exactly):
+    #   height = 2 * (res // (vae_scale * 2)) = 2 * (res // 16) = res // 8
+    #   noise shape = (B, latent_ch, height//2, height//2) = (B, latent_ch, res//16, res//16)
+    #   after _pack_latents → (B, (res//16)^2, latent_ch)
+    latent_ch = transformer.x_embedder.weight.shape[1]  # 128 for Flux2Klein
+    spatial   = args.resolution // 16                   # 512 → 32
+    log.info(f"latent_ch={latent_ch}  spatial={spatial}×{spatial}  seq_len={spatial*spatial}")
 
-    latent_h = args.resolution // 8          # e.g. 512 → 64
-    latent_w = args.resolution // 8
-    packed_h = latent_h // max(patch_size, 1)  # for patch_size=1: same as latent_h
-    packed_w = latent_w // max(patch_size, 1)
-    img_ids  = prepare_img_ids(packed_h, packed_w, device, dtype)  # [seq, 3]
+    img_ids = prepare_img_ids(1, spatial, spatial, device, dtype)  # [1, seq, 4]
 
     # For flow-matching training we sample t ∈ (0,1) directly —
     # no need for scheduler.set_timesteps (avoids FLUX.2-klein mu requirement)
@@ -335,8 +330,9 @@ def train(args: argparse.Namespace) -> None:
         t_norm = torch.tensor([random.uniform(0.02, 0.98)], device=device, dtype=dtype)
 
         # Random noise as "input" — concept sliders train on the noise distribution
-        x_noise = torch.randn(1, latent_ch, latent_h, latent_w, device=device, dtype=dtype)
-        x_packed = pack_latents(x_noise, patch_size=max(patch_size, 1))  # [1, seq, x_emb_in]
+        # Shape matches Flux2Klein's prepare_latents: (B, latent_ch, spatial, spatial)
+        x_noise  = torch.randn(1, latent_ch, spatial, spatial, device=device, dtype=dtype)
+        x_packed = pack_latents(x_noise)  # [1, spatial*spatial, latent_ch]
 
         # --- 6d.  Baseline velocity predictions — NO LoRA, NO grad ---
         with torch.no_grad():
