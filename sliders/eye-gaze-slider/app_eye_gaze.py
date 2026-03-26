@@ -263,11 +263,15 @@ def build_app(model_id, lora_h, lora_v, rank, alpha):
                         gr.HTML(JOYSTICK_HTML)
 
                         # Hidden Number components that JS writes to
+                        # visible=True so Gradio keeps these in the DOM;
+                        # they are hidden purely via CSS (.gaze-hidden class)
                         gaze_x_val = gr.Number(
-                            value=0.0, visible=False, elem_id="gaze-x-val", label="gaze_x"
+                            value=0.0, elem_id="gaze-x-val", label="gaze_x",
+                            elem_classes=["gaze-hidden"],
                         )
                         gaze_y_val = gr.Number(
-                            value=0.0, visible=False, elem_id="gaze-y-val", label="gaze_y"
+                            value=0.0, elem_id="gaze-y-val", label="gaze_y",
+                            elem_classes=["gaze-hidden"],
                         )
 
                         eye_open_sl = gr.Slider(
@@ -407,6 +411,11 @@ if __name__ == "__main__":
         css="""
           .tab-nav button { font-size: 13px; padding: 6px 18px; }
           #status-box textarea { font-size: 12px; color: #aaa; }
-          #gaze-x-val, #gaze-y-val { display: none !important; }
+          .gaze-hidden {
+            position: absolute !important;
+            width: 1px !important; height: 1px !important;
+            opacity: 0 !important; pointer-events: none !important;
+            overflow: hidden !important;
+          }
         """,
     )
