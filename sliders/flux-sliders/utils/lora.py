@@ -56,12 +56,15 @@ def load_ortho_dict(n):
     os.makedirs(base, exist_ok=True)
     path = os.path.join(base, f'{n:09}.ckpt')
     if os.path.isfile(path):
-        return torch.load(path)
-    else:
-        x = torch.randn(n,n)
-        eig, _, _ = torch.svd(x)
-        torch.save(eig, path)
-        return eig
+        try:
+            return torch.load(path, weights_only=True)
+        except Exception:
+            os.remove(path)  # corrupted — regenerate
+    # QR decomposition: stable, no MKL SGESDD dependency
+    x = torch.randn(n, n, dtype=torch.float32)
+    eig, _ = torch.linalg.qr(x)
+    torch.save(eig, path)
+    return eig
 
 def init_ortho_proj(rank, weight):
     seed = torch.seed()
