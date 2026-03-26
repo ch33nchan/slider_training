@@ -51,13 +51,7 @@ from utils.lora import LoRANetwork  # noqa
 # ---------------------------------------------------------------------------
 # Diffusers imports — FluxImg2ImgPipeline requires diffusers >= 0.30
 # ---------------------------------------------------------------------------
-try:
-    from diffusers import FluxImg2ImgPipeline
-    _HAS_IMG2IMG = True
-except ImportError:
-    _HAS_IMG2IMG = False
-
-from diffusers import FluxPipeline  # fallback txt2img pipeline
+from diffusers import Flux2KleinPipeline
 
 
 class GazeSliderInference:
@@ -136,23 +130,13 @@ class GazeSliderInference:
     # ------------------------------------------------------------------
 
     def _load_pipeline(self, model_id: str) -> None:
-        """Load FluxImg2ImgPipeline (preferred) or FluxPipeline as fallback."""
-        if _HAS_IMG2IMG:
-            self.pipe = FluxImg2ImgPipeline.from_pretrained(
-                model_id,
-                torch_dtype=self.dtype,
-            ).to(self.device)
-            self._img2img_mode = True
-            print("[GazeSlider] Using FluxImg2ImgPipeline")
-        else:
-            print("[GazeSlider] FluxImg2ImgPipeline not available — "
-                  "falling back to FluxPipeline (txt2img only). "
-                  "Upgrade diffusers: pip install -U diffusers")
-            self.pipe = FluxPipeline.from_pretrained(
-                model_id,
-                torch_dtype=self.dtype,
-            ).to(self.device)
-            self._img2img_mode = False
+        """Load Flux2KleinPipeline — supports image+prompt img2img natively."""
+        self.pipe = Flux2KleinPipeline.from_pretrained(
+            model_id,
+            torch_dtype=self.dtype,
+        ).to(self.device)
+        self._img2img_mode = True
+        print("[GazeSlider] Using Flux2KleinPipeline")
 
         # Disable VAE tiling / slicing for now (can enable for large images)
         self.pipe.vae.enable_tiling(False)
@@ -258,26 +242,14 @@ class GazeSliderInference:
         self.network_v.set_lora_slider(scale=scale_v)
 
         with self.network_h, self.network_v:
-            if self._img2img_mode:
-                result = self.pipe(
-                    image=image_resized,
-                    prompt=prompt,
-                    negative_prompt=negative_prompt or None,
-                    strength=strength,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    generator=generator,
-                    output_type="pil",
-                ).images[0]
-            else:
-                # Fallback: txt2img (no identity preservation)
-                result = self.pipe(
-                    prompt=prompt,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    generator=generator,
-                    output_type="pil",
-                ).images[0]
+            result = self.pipe(
+                image=image_resized,
+                prompt=prompt,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+                output_type="pil",
+            ).images[0]
 
         # Resize back to original dimensions
         result = result.resize(orig_size, Image.LANCZOS)
