@@ -66,7 +66,11 @@ JOYSTICK_HTML = """
 </div>
 
 <script>
-(function () {
+(function waitForCanvas() {
+  /* Gradio injects HTML dynamically — poll until the canvas is in the DOM */
+  const canvas = document.getElementById('gaze-joystick');
+  if (!canvas) { setTimeout(waitForCanvas, 50); return; }
+
   /* ---- constants ---- */
   const W = 220, H = 220, CX = W / 2, CY = H / 2;
   const RADIUS = CX - 16;   // max travel radius of dot
@@ -75,8 +79,7 @@ JOYSTICK_HTML = """
   let dotX = CX, dotY = CY, dragging = false;
 
   /* ---- canvas ---- */
-  const canvas = document.getElementById('gaze-joystick');
-  const ctx    = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d');
 
   function draw() {
     ctx.clearRect(0, 0, W, H);
@@ -219,7 +222,7 @@ JOYSTICK_HTML = """
   };
 
   draw();
-})();
+}());
 </script>
 """
 
