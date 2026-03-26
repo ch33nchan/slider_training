@@ -81,17 +81,29 @@ JOYSTICK_HTML = """
   function draw() {
     ctx.clearRect(0, 0, W, H);
 
-    /* background */
+    /* background — rounded rect (compatible with all browsers) */
+    function rrect(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.arc(x + w - r, y + r,     r, -Math.PI/2, 0);
+      ctx.lineTo(x + w, y + h - r);
+      ctx.arc(x + w - r, y + h - r, r,  0,         Math.PI/2);
+      ctx.lineTo(x + r,  y + h);
+      ctx.arc(x + r,     y + h - r, r,  Math.PI/2, Math.PI);
+      ctx.lineTo(x,      y + r);
+      ctx.arc(x + r,     y + r,     r,  Math.PI,   -Math.PI/2);
+      ctx.closePath();
+    }
+
     ctx.fillStyle = '#1a1a1a';
-    ctx.beginPath();
-    ctx.roundRect(0, 0, W, H, 10);
+    rrect(0, 0, W, H, 10);
     ctx.fill();
 
     /* outer ring */
     ctx.strokeStyle = '#2e2e2e';
     ctx.lineWidth   = 1.5;
-    ctx.beginPath();
-    ctx.roundRect(1, 1, W - 2, H - 2, 9);
+    rrect(1, 1, W - 2, H - 2, 9);
     ctx.stroke();
 
     /* dashed crosshairs */
