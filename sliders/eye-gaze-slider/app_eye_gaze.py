@@ -54,176 +54,105 @@ def get_engine(model_id: str, lora_h: str, lora_v: str,
 
 JOYSTICK_HTML = """
 <div style="display:flex;flex-direction:column;align-items:center;gap:6px;user-select:none;">
-
   <canvas id="gaze-joystick"
     width="220" height="220"
-    style="cursor:crosshair;border-radius:10px;display:block;touch-action:none;">
+    style="cursor:crosshair;border-radius:10px;display:block;touch-action:none;background:#1a1a1a;">
   </canvas>
-
   <div style="color:#888;font-size:11px;letter-spacing:0.04em;text-align:center;">
     DRAG  to set eye gaze direction
   </div>
 </div>
+"""
 
-<script>
-(function waitForCanvas() {
-  /* Gradio injects HTML dynamically — poll until the canvas is in the DOM */
-  const canvas = document.getElementById('gaze-joystick');
-  if (!canvas) { setTimeout(waitForCanvas, 50); return; }
+# ---------------------------------------------------------------------------
+# Joystick init JS — run via demo.load(js=...) so Gradio actually executes it.
+# (Scripts in gr.HTML are set via innerHTML and browsers skip them silently.)
+# ---------------------------------------------------------------------------
+JOYSTICK_INIT_JS = """
+() => {
+  function initJoystick() {
+    const canvas = document.getElementById('gaze-joystick');
+    if (!canvas) { setTimeout(initJoystick, 80); return; }
+    if (canvas._gazeInit) return;   // already initialised
+    canvas._gazeInit = true;
 
-  /* ---- constants ---- */
-  const W = 220, H = 220, CX = W / 2, CY = H / 2;
-  const RADIUS = CX - 16;   // max travel radius of dot
+    const W = 220, H = 220, CX = W/2, CY = H/2;
+    const RADIUS = CX - 16;
+    let dotX = CX, dotY = CY, dragging = false;
+    const ctx = canvas.getContext('2d');
 
-  /* ---- state ---- */
-  let dotX = CX, dotY = CY, dragging = false;
-
-  /* ---- canvas ---- */
-  const ctx = canvas.getContext('2d');
-
-  function draw() {
-    ctx.clearRect(0, 0, W, H);
-
-    /* background — rounded rect (compatible with all browsers) */
     function rrect(x, y, w, h, r) {
       ctx.beginPath();
-      ctx.moveTo(x + r, y);
-      ctx.lineTo(x + w - r, y);
-      ctx.arc(x + w - r, y + r,     r, -Math.PI/2, 0);
-      ctx.lineTo(x + w, y + h - r);
-      ctx.arc(x + w - r, y + h - r, r,  0,         Math.PI/2);
-      ctx.lineTo(x + r,  y + h);
-      ctx.arc(x + r,     y + h - r, r,  Math.PI/2, Math.PI);
-      ctx.lineTo(x,      y + r);
-      ctx.arc(x + r,     y + r,     r,  Math.PI,   -Math.PI/2);
+      ctx.moveTo(x+r, y);
+      ctx.lineTo(x+w-r, y);
+      ctx.arc(x+w-r, y+r,   r, -Math.PI/2, 0);
+      ctx.lineTo(x+w, y+h-r);
+      ctx.arc(x+w-r, y+h-r, r,  0,          Math.PI/2);
+      ctx.lineTo(x+r, y+h);
+      ctx.arc(x+r,   y+h-r, r,  Math.PI/2,  Math.PI);
+      ctx.lineTo(x,   y+r);
+      ctx.arc(x+r,   y+r,   r,  Math.PI,   -Math.PI/2);
       ctx.closePath();
     }
 
-    ctx.fillStyle = '#1a1a1a';
-    rrect(0, 0, W, H, 10);
-    ctx.fill();
-
-    /* outer ring */
-    ctx.strokeStyle = '#2e2e2e';
-    ctx.lineWidth   = 1.5;
-    rrect(1, 1, W - 2, H - 2, 9);
-    ctx.stroke();
-
-    /* dashed crosshairs */
-    ctx.setLineDash([4, 7]);
-    ctx.strokeStyle = '#3a3a3a';
-    ctx.lineWidth   = 1;
-    ctx.beginPath(); ctx.moveTo(CX, 10); ctx.lineTo(CX, H - 10); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(10, CY); ctx.lineTo(W - 10, CY); ctx.stroke();
-    ctx.setLineDash([]);
-
-    /* arrow hints */
-    ctx.fillStyle   = '#505050';
-    ctx.font        = 'bold 13px sans-serif';
-    ctx.textAlign   = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('↑', CX, 13);
-    ctx.fillText('↓', CX, H - 13);
-    ctx.fillText('←', 13, CY);
-    ctx.fillText('→', W - 13, CY);
-
-    /* dot glow */
-    const grd = ctx.createRadialGradient(dotX, dotY, 0, dotX, dotY, 22);
-    grd.addColorStop(0, 'rgba(59,130,246,0.35)');
-    grd.addColorStop(1, 'rgba(59,130,246,0)');
-    ctx.beginPath();
-    ctx.arc(dotX, dotY, 22, 0, Math.PI * 2);
-    ctx.fillStyle = grd;
-    ctx.fill();
-
-    /* dot */
-    ctx.beginPath();
-    ctx.arc(dotX, dotY, 11, 0, Math.PI * 2);
-    ctx.fillStyle   = '#3b82f6';
-    ctx.fill();
-    ctx.strokeStyle = '#93c5fd';
-    ctx.lineWidth   = 1.5;
-    ctx.stroke();
-
-    /* centre pip when dot is away from centre */
-    if (Math.hypot(dotX - CX, dotY - CY) > 6) {
-      ctx.beginPath();
-      ctx.arc(CX, CY, 3, 0, Math.PI * 2);
-      ctx.fillStyle = '#444';
-      ctx.fill();
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = '#1a1a1a'; rrect(0,0,W,H,10); ctx.fill();
+      ctx.strokeStyle = '#2e2e2e'; ctx.lineWidth = 1.5; rrect(1,1,W-2,H-2,9); ctx.stroke();
+      ctx.setLineDash([4,7]); ctx.strokeStyle='#3a3a3a'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(CX,10); ctx.lineTo(CX,H-10); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(10,CY); ctx.lineTo(W-10,CY); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle='#505050'; ctx.font='bold 13px sans-serif';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('↑',CX,13); ctx.fillText('↓',CX,H-13);
+      ctx.fillText('←',13,CY); ctx.fillText('→',W-13,CY);
+      const grd = ctx.createRadialGradient(dotX,dotY,0,dotX,dotY,22);
+      grd.addColorStop(0,'rgba(59,130,246,0.35)'); grd.addColorStop(1,'rgba(59,130,246,0)');
+      ctx.beginPath(); ctx.arc(dotX,dotY,22,0,Math.PI*2); ctx.fillStyle=grd; ctx.fill();
+      ctx.beginPath(); ctx.arc(dotX,dotY,11,0,Math.PI*2);
+      ctx.fillStyle='#3b82f6'; ctx.fill();
+      ctx.strokeStyle='#93c5fd'; ctx.lineWidth=1.5; ctx.stroke();
+      if (Math.hypot(dotX-CX,dotY-CY)>6) {
+        ctx.beginPath(); ctx.arc(CX,CY,3,0,Math.PI*2); ctx.fillStyle='#444'; ctx.fill();
+      }
     }
-  }
 
-  /* ---- event helpers ---- */
-  function clientXY(e) {
-    const t = e.touches ? e.touches[0] : e;
-    return { cx: t.clientX, cy: t.clientY };
-  }
-
-  function clampToCircle(rx, ry) {
-    const dist = Math.hypot(rx, ry);
-    if (dist > RADIUS) {
-      const f = RADIUS / dist;
-      return { rx: rx * f, ry: ry * f };
+    function clientXY(e) { const t=e.touches?e.touches[0]:e; return {cx:t.clientX,cy:t.clientY}; }
+    function clamp(rx,ry) {
+      const d=Math.hypot(rx,ry);
+      if(d>RADIUS){const f=RADIUS/d; return{rx:rx*f,ry:ry*f};}
+      return{rx,ry};
     }
-    return { rx, ry };
-  }
-
-  function updateDot(e) {
-    const rect = canvas.getBoundingClientRect();
-    const sx   = canvas.width / rect.width;
-    const sy   = canvas.height / rect.height;
-    const { cx, cy } = clientXY(e);
-    const { rx, ry } = clampToCircle(
-      (cx - rect.left) * sx - CX,
-      (cy - rect.top)  * sy - CY
-    );
-    dotX = CX + rx;
-    dotY = CY + ry;
+    function updateDot(e) {
+      const r=canvas.getBoundingClientRect();
+      const {cx,cy}=clientXY(e);
+      const {rx,ry}=clamp((cx-r.left)*(W/r.width)-CX,(cy-r.top)*(H/r.height)-CY);
+      dotX=CX+rx; dotY=CY+ry; draw();
+    }
+    function pushToGradio() {
+      const nx=(dotX-CX)/RADIUS, ny=-(dotY-CY)/RADIUS;
+      function setNum(id,v) {
+        const w=document.getElementById(id); if(!w)return;
+        const inp=w.querySelector('input[type="number"]'); if(!inp)return;
+        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value')
+          .set.call(inp,v.toFixed(4));
+        inp.dispatchEvent(new Event('input',{bubbles:true}));
+        inp.dispatchEvent(new Event('change',{bubbles:true}));
+      }
+      setNum('gaze-x-val',nx); setNum('gaze-y-val',ny);
+    }
+    canvas.addEventListener('mousedown', e=>{dragging=true; updateDot(e);});
+    canvas.addEventListener('mousemove', e=>{if(dragging)updateDot(e);});
+    window.addEventListener('mouseup',   ()=>{if(dragging){dragging=false;pushToGradio();}});
+    canvas.addEventListener('touchstart',e=>{e.preventDefault();dragging=true;updateDot(e);},{passive:false});
+    canvas.addEventListener('touchmove', e=>{e.preventDefault();if(dragging)updateDot(e);},{passive:false});
+    window.addEventListener('touchend',  ()=>{if(dragging){dragging=false;pushToGradio();}});
+    window.resetGazeJoystick=()=>{dotX=CX;dotY=CY;draw();pushToGradio();};
     draw();
   }
-
-  /* ---- push values to Gradio hidden Number inputs ---- */
-  function pushToGradio() {
-    const nx =  (dotX - CX) / RADIUS;   //  +1 = right  / -1 = left
-    const ny = -(dotY - CY) / RADIUS;   //  +1 = up     / -1 = down
-
-    /* Gradio 4.x: find Number components by their elem_id wrapper */
-    function setGradioNumber(elemId, val) {
-      const wrapper = document.getElementById(elemId);
-      if (!wrapper) return;
-      const inp = wrapper.querySelector('input[type="number"]');
-      if (!inp) return;
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype, 'value').set;
-      setter.call(inp, val.toFixed(4));
-      inp.dispatchEvent(new Event('input',  { bubbles: true }));
-      inp.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-
-    setGradioNumber('gaze-x-val', nx);
-    setGradioNumber('gaze-y-val', ny);
-  }
-
-  /* ---- mouse ---- */
-  canvas.addEventListener('mousedown',  (e) => { dragging = true;  updateDot(e); });
-  canvas.addEventListener('mousemove',  (e) => { if (dragging) updateDot(e); });
-  window.addEventListener('mouseup',    ()  => { if (dragging) { dragging = false; pushToGradio(); }});
-
-  /* ---- touch ---- */
-  canvas.addEventListener('touchstart', (e) => { e.preventDefault(); dragging = true; updateDot(e); }, { passive: false });
-  canvas.addEventListener('touchmove',  (e) => { e.preventDefault(); if (dragging) updateDot(e); },   { passive: false });
-  window.addEventListener('touchend',   ()  => { if (dragging) { dragging = false; pushToGradio(); }});
-
-  /* ---- public reset function (called by Gradio Reset button) ---- */
-  window.resetGazeJoystick = function () {
-    dotX = CX; dotY = CY; draw();
-    pushToGradio();
-  };
-
-  draw();
-}());
-</script>
+  initJoystick();
+}
 """
 
 RESET_JS = """
@@ -428,6 +357,11 @@ def build_app(model_id, lora_h, lora_v, rank, alpha):
         # (fires whenever gaze_x_val or gaze_y_val changes via JS)
         gaze_x_val.change(fn=None, inputs=[], outputs=[])  # placeholder
         gaze_y_val.change(fn=None, inputs=[], outputs=[])  # placeholder
+
+        # ---- Initialise joystick canvas via Gradio's JS hook ----
+        # gr.HTML scripts are inserted via innerHTML and browsers skip them;
+        # demo.load(js=...) is the correct way to run JS in Gradio 4.x.
+        demo.load(fn=None, js=JOYSTICK_INIT_JS)
 
     return demo
 
