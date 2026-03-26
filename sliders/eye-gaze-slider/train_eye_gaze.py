@@ -185,19 +185,33 @@ def forward_transformer(transformer, x_packed, seq_emb, pooled_emb,
                         timestep_norm, img_ids, txt_ids) -> torch.Tensor:
     """
     Returns the velocity prediction from the Flux transformer.
-    pooled_emb may be None for models that use a single text encoder (e.g. Qwen3).
-    Call inside `with network:` to enable LoRA, or `torch.no_grad()` for baselines.
+    Inspects the actual forward() signature at runtime so the same call
+    works for both FLUX.1 (img_ids/txt_ids/pooled_projections) and
+    FLUX.2-klein (Qwen3, no pooled_projections / no positional ID args).
     """
-    kwargs = dict(
-        hidden_states=x_packed,
-        encoder_hidden_states=seq_emb,
-        timestep=timestep_norm,
-        img_ids=img_ids,
-        txt_ids=txt_ids,
-        return_dict=False,
-    )
-    if pooled_emb is not None:
+    import inspect
+    sig = inspect.signature(transformer.forward).parameters
+
+    kwargs: dict = {"hidden_states": x_packed, "return_dict": False}
+
+    # encoder hidden states — always needed
+    if "encoder_hidden_states" in sig:
+        kwargs["encoder_hidden_states"] = seq_emb
+
+    # timestep argument name varies across model versions
+    if "timestep" in sig:
+        kwargs["timestep"] = timestep_norm
+
+    # pooled CLIP projections — only for dual-encoder models
+    if pooled_emb is not None and "pooled_projections" in sig:
         kwargs["pooled_projections"] = pooled_emb
+
+    # positional ID tensors — only for FLUX.1-style transformers
+    if img_ids is not None and "img_ids" in sig:
+        kwargs["img_ids"] = img_ids
+    if txt_ids is not None and "txt_ids" in sig:
+        kwargs["txt_ids"] = txt_ids
+
     return transformer(**kwargs)[0]
 
 
