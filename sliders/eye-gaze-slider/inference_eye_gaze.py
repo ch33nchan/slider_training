@@ -235,7 +235,10 @@ class GazeSliderInference:
         )
         # [1, 32, 128, 128] — VAE spatial latents
         vae_latents = self.pipe.vae.encode(img_tensor).latent_dist.sample()
-        vae_latents = vae_latents * self.pipe.vae.config.scaling_factor
+        # scaling_factor key varies by diffusers version / model
+        sf = getattr(self.pipe.vae.config, "scaling_factor",
+             getattr(self.pipe.vae.config, "scale_factor", 0.13025))
+        vae_latents = vae_latents * sf
 
         # [1, 128, 64, 64] — match pipeline's internal latent format
         latents_spatial = F.pixel_unshuffle(vae_latents, downscale_factor=2)
