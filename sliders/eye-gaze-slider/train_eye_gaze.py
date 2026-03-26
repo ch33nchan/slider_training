@@ -161,7 +161,12 @@ def encode_text(prompt: str, pipe: FluxPipeline, device, dtype):
     if "prompt_2" in ep_sig:
         kwargs["prompt_2"] = None   # FLUX.1 dual-encoder pipelines
     result = pipe.encode_prompt(**kwargs)
-    seq_emb, pooled_emb, txt_ids = result
+    # FLUX.1 returns 3-tuple (seq, pooled, txt_ids); FLUX.2-klein returns 2-tuple
+    if len(result) == 3:
+        seq_emb, pooled_emb, txt_ids = result
+    else:
+        seq_emb, pooled_emb = result
+        txt_ids = None
     seq_emb = seq_emb.to(dtype)
     if pooled_emb is not None:
         pooled_emb = pooled_emb.to(dtype)
