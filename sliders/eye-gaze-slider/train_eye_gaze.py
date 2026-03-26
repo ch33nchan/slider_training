@@ -155,12 +155,12 @@ def encode_text(prompt: str, pipe: FluxPipeline, device, dtype):
     pooled_emb  : [1, hidden] or None   — pooled_projections
     txt_ids     : [seq_len, 3]          — positional IDs for text tokens
     """
-    result = pipe.encode_prompt(
-        prompt=prompt,
-        prompt_2=None,
-        device=device,
-        num_images_per_prompt=1,
-    )
+    import inspect
+    ep_sig = inspect.signature(pipe.encode_prompt).parameters
+    kwargs = dict(prompt=prompt, device=device, num_images_per_prompt=1)
+    if "prompt_2" in ep_sig:
+        kwargs["prompt_2"] = None   # FLUX.1 dual-encoder pipelines
+    result = pipe.encode_prompt(**kwargs)
     seq_emb, pooled_emb, txt_ids = result
     seq_emb = seq_emb.to(dtype)
     if pooled_emb is not None:
