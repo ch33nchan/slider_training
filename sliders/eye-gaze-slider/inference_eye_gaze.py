@@ -138,8 +138,7 @@ class GazeSliderInference:
         self._img2img_mode = True
         print("[GazeSlider] Using Flux2KleinPipeline")
 
-        # Disable VAE tiling / slicing for now (can enable for large images)
-        self.pipe.vae.enable_tiling(False)
+        pass  # VAE tiling left at default
 
     def _load_lora(self, network: LoRANetwork, path: Union[str, Path], label: str) -> None:
         """Load safetensors / pt weights into a LoRANetwork."""
