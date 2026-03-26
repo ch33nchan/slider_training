@@ -280,25 +280,7 @@ def build_app(model_id, lora_h, lora_v, rank, alpha):
         return run_inference(img, gx, gy, strength, intensity, steps, prompt,
                              model_id, lora_h, lora_v, rank, alpha)
 
-    with gr.Blocks(
-        title="Eye Gaze Slider — FLUX.2-klein",
-        theme=gr.themes.Base(
-            primary_hue="blue",
-            neutral_hue="gray",
-        ).set(
-            body_background_fill="#111111",
-            block_background_fill="#1c1c1c",
-            block_border_color="#2a2a2a",
-            input_background_fill="#222222",
-            button_primary_background_fill="#3b82f6",
-            button_primary_background_fill_hover="#2563eb",
-        ),
-        css="""
-          .tab-nav button { font-size: 13px; padding: 6px 18px; }
-          #status-box textarea { font-size: 12px; color: #aaa; }
-          #gaze-x-val, #gaze-y-val { display: none !important; }
-        """,
-    ) as demo:
+    with gr.Blocks(title="Eye Gaze Slider — FLUX.2-klein") as demo:
 
         gr.Markdown(
             "## 👁  Eye Gaze & Expressions  —  FLUX.2-klein",
@@ -447,4 +429,17 @@ if __name__ == "__main__":
         server_name=args.server,
         server_port=args.port,
         share=args.share,
+        theme=gr.themes.Base(primary_hue="blue", neutral_hue="gray").set(
+            body_background_fill="#111111",
+            block_background_fill="#1c1c1c",
+            block_border_color="#2a2a2a",
+            input_background_fill="#222222",
+            button_primary_background_fill="#3b82f6",
+            button_primary_background_fill_hover="#2563eb",
+        ),
+        css="""
+          .tab-nav button { font-size: 13px; padding: 6px 18px; }
+          #status-box textarea { font-size: 12px; color: #aaa; }
+          #gaze-x-val, #gaze-y-val { display: none !important; }
+        """,
     )
