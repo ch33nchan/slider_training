@@ -54,7 +54,7 @@ except ImportError:
 from diffusers import FlowMatchEulerDiscreteScheduler
 from transformers import (
     CLIPTextModel,
-    CLIPTokenizer,
+    AutoTokenizer,
     T5EncoderModel,
     T5TokenizerFast,
 )
@@ -152,7 +152,7 @@ def prepare_img_ids(latent_h: int, latent_w: int,
 @torch.no_grad()
 def encode_text(
     prompt: str,
-    tokenizer_clip: CLIPTokenizer,
+    tokenizer_clip,
     encoder_clip: CLIPTextModel,
     tokenizer_t5: T5TokenizerFast,
     encoder_t5: T5EncoderModel,
@@ -251,7 +251,7 @@ def train(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------
     log.info(f"Loading model components from  {args.model_id}  …")
 
-    tokenizer_clip = CLIPTokenizer.from_pretrained(args.model_id, subfolder="tokenizer")
+    tokenizer_clip = AutoTokenizer.from_pretrained(args.model_id, subfolder="tokenizer")
     encoder_clip = CLIPTextModel.from_pretrained(
         args.model_id, subfolder="text_encoder", torch_dtype=dtype
     ).to(device).eval()
