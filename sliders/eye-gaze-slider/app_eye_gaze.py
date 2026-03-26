@@ -228,6 +228,8 @@ def run_inference(
     input_image,
     gaze_x: float,
     gaze_y: float,
+    eye_open: float,
+    brow_raise: float,
     strength: float,
     lora_intensity: float,
     num_steps: int,
@@ -252,6 +254,8 @@ def run_inference(
             image=input_image,
             gaze_x=float(gaze_x),
             gaze_y=float(gaze_y),
+            eye_open=float(eye_open),
+            brow_raise=float(brow_raise),
             prompt=prompt,
             strength=float(strength),
             num_inference_steps=int(num_steps),
@@ -260,6 +264,7 @@ def run_inference(
         )
         status = (
             f"✓ Done  |  gaze ({gaze_x:+.2f}, {gaze_y:+.2f})  "
+            f"eye_open={eye_open:+.2f}  brow={brow_raise:+.2f}  "
             f"strength={strength:.2f}  intensity={lora_intensity:.1f}"
         )
         return out, status
@@ -276,9 +281,9 @@ def run_inference(
 def build_app(model_id, lora_h, lora_v, rank, alpha):
 
     # Wrap inference so CLI args are baked in without globals
-    def _infer(img, gx, gy, strength, intensity, steps, prompt):
-        return run_inference(img, gx, gy, strength, intensity, steps, prompt,
-                             model_id, lora_h, lora_v, rank, alpha)
+    def _infer(img, gx, gy, eye_open, brow_raise, strength, intensity, steps, prompt):
+        return run_inference(img, gx, gy, eye_open, brow_raise, strength, intensity,
+                             steps, prompt, model_id, lora_h, lora_v, rank, alpha)
 
     with gr.Blocks(title="Eye Gaze Slider — FLUX.2-klein") as demo:
 
@@ -321,6 +326,17 @@ def build_app(model_id, lora_h, lora_v, rank, alpha):
                             value=0.0, visible=False, elem_id="gaze-y-val", label="gaze_y"
                         )
 
+                        eye_open_sl = gr.Slider(
+                            label="Open / Close Eyes",
+                            minimum=-1.0, maximum=1.0, step=0.05, value=0.0,
+                            info="-1 = close  ·  0 = neutral  ·  +1 = open",
+                        )
+                        brow_raise_sl = gr.Slider(
+                            label="Raise / Lower Eyebrows",
+                            minimum=-1.0, maximum=1.0, step=0.05, value=0.0,
+                            info="-1 = lower  ·  0 = neutral  ·  +1 = raise",
+                        )
+
                         gr.Markdown("---")
 
                         strength_sl = gr.Slider(
@@ -335,7 +351,8 @@ def build_app(model_id, lora_h, lora_v, rank, alpha):
                         )
                         steps_sl = gr.Slider(
                             label="Inference Steps",
-                            minimum=4, maximum=50, step=1, value=28,
+                            minimum=4, maximum=50, step=1, value=8,
+                            info="4–12 recommended for FLUX.2-klein (distilled)",
                         )
 
                         prompt_box = gr.Textbox(
@@ -378,6 +395,7 @@ def build_app(model_id, lora_h, lora_v, rank, alpha):
             fn=_infer,
             inputs=[
                 input_img, gaze_x_val, gaze_y_val,
+                eye_open_sl, brow_raise_sl,
                 strength_sl, intensity_sl, steps_sl, prompt_box,
             ],
             outputs=[output_img, status_box],

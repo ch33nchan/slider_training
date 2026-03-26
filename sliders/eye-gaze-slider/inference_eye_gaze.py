@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from safetensors.torch import load_file
 
@@ -168,11 +169,12 @@ class GazeSliderInference:
         image: Image.Image,
         gaze_x: float = 0.0,
         gaze_y: float = 0.0,
+        eye_open: float = 0.0,    # -1 close → +1 open  (placeholder, no LoRA yet)
+        brow_raise: float = 0.0,  # -1 lower  → +1 raise (placeholder, no LoRA yet)
         prompt: str = "professional portrait photograph, studio lighting, "
                       "photorealistic, sharp focus, high quality",
-        negative_prompt: str = "",
         strength: float = 0.45,
-        num_inference_steps: int = 28,
+        num_inference_steps: int = 8,
         guidance_scale: float = 0.0,
         max_scale: float = 5.0,
         seed: Optional[int] = None,
@@ -210,49 +212,63 @@ class GazeSliderInference:
         PIL.Image.Image — edited portrait
         """
         # --- Input validation ---
-        gaze_x = max(-1.0, min(1.0, float(gaze_x)))
-        gaze_y = max(-1.0, min(1.0, float(gaze_y)))
+        gaze_x  = max(-1.0, min(1.0, float(gaze_x)))
+        gaze_y  = max(-1.0, min(1.0, float(gaze_y)))
         strength = max(0.05, min(1.0, float(strength)))
 
-        # --- LoRA scale mapping ---
-        # Horizontal: positive scale → left gaze (matches YAML positive prompt)
-        # Negative scale → right gaze
-        scale_h = gaze_x * max_scale   # joystick right (+x) = looking right = negative H scale
-        # Wait: YAML positive = "looking left", so positive scale = left.
-        # Joystick right (+x) should look right, meaning NEGATIVE scale.
-        # → scale_h = -gaze_x * max_scale  ... but let's keep +x = +scale
-        #   and let the user/joystick define which side is positive.
-        #   Convention here: gaze_x > 0 → left (matches YAML positive direction).
-        scale_h =  gaze_x * max_scale   # +x joystick  → left gaze
-        scale_v =  gaze_y * max_scale   # +y joystick  → up   gaze
+        scale_h = gaze_x * max_scale   # +x joystick → left gaze
+        scale_v = gaze_y * max_scale   # +y joystick → up   gaze
 
-        # --- Generator ---
         generator = None
         if seed is not None:
             generator = torch.Generator(device=self.device).manual_seed(seed)
 
-        # --- Prepare input image ---
-        # Resize to 1024×1024 (standard Flux resolution)
-        orig_size = image.size
+        orig_size     = image.size
         image_resized = image.convert("RGB").resize((1024, 1024), Image.LANCZOS)
 
-        # --- Activate both LoRAs and run pipeline ---
+        # ------------------------------------------------------------------
+        # Proper img2img: VAE-encode → pixel_unshuffle → add partial noise
+        # This preserves identity instead of starting from random noise.
+        # ------------------------------------------------------------------
+        img_tensor = self.pipe.image_processor.preprocess(image_resized).to(
+            device=self.device, dtype=self.dtype
+        )
+        # [1, 32, 128, 128] — VAE spatial latents
+        vae_latents = self.pipe.vae.encode(img_tensor).latent_dist.sample()
+        vae_latents = vae_latents * self.pipe.vae.config.scaling_factor
+
+        # [1, 128, 64, 64] — match pipeline's internal latent format
+        latents_spatial = F.pixel_unshuffle(vae_latents, downscale_factor=2)
+
+        # flow-matching noise: x_t = (1-t)*x_0 + t*eps
+        noise   = torch.randn_like(latents_spatial)
+        t       = float(strength)
+        noisy   = (1.0 - t) * latents_spatial + t * noise  # [1, 128, 64, 64]
+
+        # partial sigma schedule: denoise from strength → 0
+        n_steps = max(2, int(num_inference_steps * strength))
+        sigmas  = torch.linspace(t, 1e-3, n_steps + 1, dtype=torch.float32)
+
+        # ------------------------------------------------------------------
+        # Run pipeline: pass noisy latents (img2img starting point) AND
+        # image (concatenated identity conditioning for Flux2Klein)
+        # ------------------------------------------------------------------
         self.network_h.set_lora_slider(scale=scale_h)
         self.network_v.set_lora_slider(scale=scale_v)
 
         with self.network_h, self.network_v:
             result = self.pipe(
-                image=image_resized,
+                image=image_resized,       # Flux2Klein concat-conditioning (identity)
                 prompt=prompt,
-                num_inference_steps=num_inference_steps,
+                latents=noisy,             # pre-noised start (identity preservation)
+                sigmas=sigmas,
+                num_inference_steps=n_steps,
                 guidance_scale=guidance_scale,
                 generator=generator,
                 output_type="pil",
             ).images[0]
 
-        # Resize back to original dimensions
-        result = result.resize(orig_size, Image.LANCZOS)
-        return result
+        return result.resize(orig_size, Image.LANCZOS)
 
     def apply_gaze_batch(
         self,
