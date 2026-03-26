@@ -235,9 +235,9 @@ class GazeSliderInference:
         # passing them via the pipeline's `latents` and `sigmas` params.
         #
         # Latent geometry for 1024×1024:
-        #   VAE encode  → [1, 32, 128, 128]
-        #   pixel_unshuffle(2) → [1, 128, 64, 64]
-        #   pack to seq → [1, 4096, 128]   (what the transformer sees)
+        #   VAE encode        → [1, 32, 128, 128]
+        #   pixel_unshuffle(2)→ [1, 128, 64, 64]  ← pass as `latents`
+        #   (pipeline packs to seq [1,4096,128] internally)
         # ------------------------------------------------------------------
 
         # 1. VAE-encode the input portrait
@@ -248,24 +248,24 @@ class GazeSliderInference:
              getattr(self.pipe.vae.config, "scale_factor", 0.13025))
         vae_latents = vae_latents * sf                              # [1,32,128,128]
 
-        # 2. Spatial pack: pixel_unshuffle(2) → reshape to sequence
+        # 2. pixel_unshuffle(2): [1,32,128,128] → [1,128,64,64]
+        #    pipeline._prepare_latent_ids() expects 4-D [B,C,H,W]; it does
+        #    its own sequence packing internally — do NOT reshape further.
         spatial = F.pixel_unshuffle(vae_latents, downscale_factor=2)  # [1,128,64,64]
-        B, C, H, W = spatial.shape
-        packed  = spatial.reshape(B, C, H * W).permute(0, 2, 1)       # [1,4096,128]
 
         # 3. Add partial noise at level `strength`
         t = float(strength)
         g_args = dict(generator=generator) if generator is not None else {}
-        noise   = torch.randn(packed.shape, device=self.device,
-                              dtype=self.dtype, **g_args)
-        noisy   = (1.0 - t) * packed + t * noise
+        noise  = torch.randn(spatial.shape, device=self.device,
+                             dtype=self.dtype, **g_args)
+        noisy  = (1.0 - t) * spatial + t * noise                       # [1,128,64,64]
 
         # 4. Sigma schedule: start from t, anneal to ~0
         n_steps = max(2, int(num_inference_steps * t))
         sigmas  = torch.linspace(t, 0.001, n_steps + 1).tolist()
 
         print(f"[GazeSlider] scale_h={scale_h:+.3f}  scale_v={scale_v:+.3f}  "
-              f"t={t:.2f}  n_steps={n_steps}  packed={tuple(packed.shape)}")
+              f"t={t:.2f}  n_steps={n_steps}  latents={tuple(noisy.shape)}")
 
         # 5. Apply LoRA and run pipeline
         self.network_h.set_lora_slider(scale=scale_h)
