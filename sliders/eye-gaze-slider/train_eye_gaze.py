@@ -47,17 +47,7 @@ sys.path.insert(0, str(FLUX_UTILS.parent))   # adds  sliders/flux-sliders  to pa
 
 from utils.lora import LoRANetwork  # noqa: E402  (flux-sliders/utils/lora.py)
 
-try:
-    from diffusers import Flux2Transformer2DModel as FluxTransformerModel
-except ImportError:
-    from diffusers import FluxTransformer2DModel as FluxTransformerModel  # older diffusers
-from diffusers import FlowMatchEulerDiscreteScheduler
-from transformers import (
-    CLIPTextModel,
-    AutoTokenizer,
-    T5EncoderModel,
-    T5TokenizerFast,
-)
+from diffusers import FluxPipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -146,85 +136,61 @@ def prepare_img_ids(latent_h: int, latent_w: int,
 
 
 # ===========================================================================
-# Text encoding — CLIP (pooled) + T5 (sequence)
+# Text encoding — via FluxPipeline.encode_prompt (handles Qwen3/CLIP/T5)
 # ===========================================================================
 
 @torch.no_grad()
-def encode_text(
-    prompt: str,
-    tokenizer_clip,
-    encoder_clip: CLIPTextModel,
-    tokenizer_t5: T5TokenizerFast,
-    encoder_t5: T5EncoderModel,
-    device: torch.device,
-    dtype: torch.dtype,
-    max_len_clip: int = 77,
-    max_len_t5: int = 256,
-):
+def encode_text(prompt: str, pipe: FluxPipeline, device, dtype):
     """
+    Delegate to the pipeline's encode_prompt so that any text encoder
+    architecture (CLIP+T5 for FLUX.1, Qwen3 for FLUX.2-klein, etc.)
+    is handled automatically.
+
     Returns
     -------
-    t5_emb   : [1, max_len_t5, 4096]  — T5 sequence embeddings (encoder_hidden_states)
-    clip_emb : [1, 768]               — CLIP pooled embedding  (pooled_projections)
-    txt_ids  : [max_len_t5, 3]        — all-zero positional IDs for text tokens
+    seq_emb     : [1, seq_len, hidden]  — encoder_hidden_states
+    pooled_emb  : [1, hidden] or None   — pooled_projections
+    txt_ids     : [seq_len, 3]          — positional IDs for text tokens
     """
-    # --- CLIP ---
-    tok_c = tokenizer_clip(
-        [prompt],
-        padding="max_length",
-        max_length=max_len_clip,
-        truncation=True,
-        return_tensors="pt",
+    result = pipe.encode_prompt(
+        prompt=prompt,
+        prompt_2=None,
+        device=device,
+        num_images_per_prompt=1,
     )
-    clip_out = encoder_clip(tok_c.input_ids.to(device))
-    clip_emb = clip_out.pooler_output.to(dtype)           # [1, 768]
-
-    # --- T5 ---
-    tok_t = tokenizer_t5(
-        [prompt],
-        padding="max_length",
-        max_length=max_len_t5,
-        truncation=True,
-        return_tensors="pt",
-    )
-    t5_out = encoder_t5(
-        input_ids=tok_t.input_ids.to(device),
-        attention_mask=tok_t.attention_mask.to(device),
-    )
-    t5_emb = t5_out.last_hidden_state.to(dtype)           # [1, max_len_t5, 4096]
-
-    txt_ids = torch.zeros(t5_emb.shape[1], 3, device=device, dtype=dtype)
-    return t5_emb, clip_emb, txt_ids
+    seq_emb, pooled_emb, txt_ids = result
+    seq_emb = seq_emb.to(dtype)
+    if pooled_emb is not None:
+        pooled_emb = pooled_emb.to(dtype)
+    if txt_ids is None:
+        txt_ids = torch.zeros(seq_emb.shape[1], 3, device=device, dtype=dtype)
+    else:
+        txt_ids = txt_ids.to(dtype)
+    return seq_emb, pooled_emb, txt_ids
 
 
 # ===========================================================================
 # One transformer forward pass (with or without LoRA context)
 # ===========================================================================
 
-def forward_transformer(
-    transformer,
-    x_packed: torch.Tensor,       # [1, seq_len, 64]
-    t5_emb: torch.Tensor,         # [1, 256, 4096]
-    clip_emb: torch.Tensor,       # [1, 768]
-    timestep_norm: torch.Tensor,  # [1]  in [0, 1]
-    img_ids: torch.Tensor,        # [seq_len, 3]
-    txt_ids: torch.Tensor,        # [256, 3]
-) -> torch.Tensor:
+def forward_transformer(transformer, x_packed, seq_emb, pooled_emb,
+                        timestep_norm, img_ids, txt_ids) -> torch.Tensor:
     """
     Returns the velocity prediction from the Flux transformer.
-    Call this inside a `with network:` block to enable the LoRA,
-    or inside `torch.no_grad()` for baseline predictions.
+    pooled_emb may be None for models that use a single text encoder (e.g. Qwen3).
+    Call inside `with network:` to enable LoRA, or `torch.no_grad()` for baselines.
     """
-    out = transformer(
+    kwargs = dict(
         hidden_states=x_packed,
-        encoder_hidden_states=t5_emb,
-        pooled_projections=clip_emb,
+        encoder_hidden_states=seq_emb,
         timestep=timestep_norm,
         img_ids=img_ids,
         txt_ids=txt_ids,
         return_dict=False,
     )
-    return out[0]
+    if pooled_emb is not None:
+        kwargs["pooled_projections"] = pooled_emb
+    return transformer(**kwargs)[0]
 
 
 # ===========================================================================
@@ -247,28 +213,23 @@ def train(args: argparse.Namespace) -> None:
     log.info(f"Loaded {len(prompts)} prompt pairs from {args.prompts_file}")
 
     # ------------------------------------------------------------------
-    # 2.  Load models (text encoders + transformer only — no VAE needed)
+    # 2.  Load via FluxPipeline — handles any text encoder architecture
+    #     (CLIP+T5 for FLUX.1, Qwen3 for FLUX.2-klein, etc.)
     # ------------------------------------------------------------------
-    log.info(f"Loading model components from  {args.model_id}  …")
-
-    tokenizer_clip = AutoTokenizer.from_pretrained(args.model_id, subfolder="tokenizer")
-    encoder_clip = CLIPTextModel.from_pretrained(
-        args.model_id, subfolder="text_encoder", torch_dtype=dtype
-    ).to(device).eval()
-
-    tokenizer_t5 = T5TokenizerFast.from_pretrained(args.model_id, subfolder="tokenizer_2")
-    encoder_t5 = T5EncoderModel.from_pretrained(
-        args.model_id, subfolder="text_encoder_2", torch_dtype=dtype
-    ).to(device).eval()
-
-    transformer = FluxTransformerModel.from_pretrained(
-        args.model_id, subfolder="transformer", torch_dtype=dtype
+    log.info(f"Loading FluxPipeline from  {args.model_id}  …")
+    pipe = FluxPipeline.from_pretrained(
+        args.model_id, torch_dtype=dtype
     ).to(device)
-    transformer.requires_grad_(False)   # freeze all base weights
 
-    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-        args.model_id, subfolder="scheduler"
-    )
+    transformer = pipe.transformer
+    transformer.requires_grad_(False)
+
+    scheduler = pipe.scheduler
+
+    # Free VAE — not needed for text-based slider training
+    del pipe.vae
+    torch.cuda.empty_cache()
+    log.info("Pipeline loaded. VAE freed to save VRAM.")
 
     # ------------------------------------------------------------------
     # 3.  Build LoRA network on the transformer
@@ -308,7 +269,7 @@ def train(args: argparse.Namespace) -> None:
     img_ids  = prepare_img_ids(packed_h, packed_w, device, dtype)  # [seq, 3]
 
     # Pre-fetch scheduler sigmas for noise level sampling
-    scheduler.set_timesteps(1000, device=device)
+    scheduler.set_timesteps(1000)
     all_timesteps = scheduler.timesteps   # shape [1000], values in [0, 1000)
 
     # ------------------------------------------------------------------
@@ -335,18 +296,9 @@ def train(args: argparse.Namespace) -> None:
         guidance_scale      = float(pc.get("guidance_scale", args.eta))
 
         # --- 6b.  Encode all three prompts ---
-        t5_tgt,  clip_tgt,  txt_ids = encode_text(
-            target_prompt, tokenizer_clip, encoder_clip,
-            tokenizer_t5, encoder_t5, device, dtype,
-        )
-        t5_pos,  clip_pos,  _       = encode_text(
-            positive_prompt, tokenizer_clip, encoder_clip,
-            tokenizer_t5, encoder_t5, device, dtype,
-        )
-        t5_neg,  clip_neg,  _       = encode_text(
-            unconditional_prompt, tokenizer_clip, encoder_clip,
-            tokenizer_t5, encoder_t5, device, dtype,
-        )
+        seq_tgt, pool_tgt, txt_ids = encode_text(target_prompt,        pipe, device, dtype)
+        seq_pos, pool_pos, _       = encode_text(positive_prompt,      pipe, device, dtype)
+        seq_neg, pool_neg, _       = encode_text(unconditional_prompt, pipe, device, dtype)
 
         # --- 6c.  Random timestep + random noise latent ---
         t_idx   = random.randint(0, len(all_timesteps) - 1)
@@ -360,25 +312,20 @@ def train(args: argparse.Namespace) -> None:
         # --- 6d.  Baseline velocity predictions — NO LoRA, NO grad ---
         with torch.no_grad():
             vel_tgt = forward_transformer(
-                transformer, x_packed, t5_tgt, clip_tgt, t_norm, img_ids, txt_ids
-            )
+                transformer, x_packed, seq_tgt, pool_tgt, t_norm, img_ids, txt_ids)
             vel_pos = forward_transformer(
-                transformer, x_packed, t5_pos, clip_pos, t_norm, img_ids, txt_ids
-            )
+                transformer, x_packed, seq_pos, pool_pos, t_norm, img_ids, txt_ids)
             vel_neg = forward_transformer(
-                transformer, x_packed, t5_neg, clip_neg, t_norm, img_ids, txt_ids
-            )
+                transformer, x_packed, seq_neg, pool_neg, t_norm, img_ids, txt_ids)
 
-        # Ground-truth direction the slider should learn:
-        # shift velocity from neutral toward (positive − negative)
+        # Ground-truth direction the slider should learn
         gt_vel = vel_tgt + guidance_scale * (vel_pos - vel_neg)
 
         # --- 6e.  Slider prediction — WITH LoRA, grads THROUGH lora_down ---
         network.set_lora_slider(scale=1.0)
         with network:
             vel_slider = forward_transformer(
-                transformer, x_packed, t5_tgt, clip_tgt, t_norm, img_ids, txt_ids
-            )
+                transformer, x_packed, seq_tgt, pool_tgt, t_norm, img_ids, txt_ids)
 
         # --- 6f.  LECO loss ---
         loss = F.mse_loss(vel_slider.float(), gt_vel.detach().float())
