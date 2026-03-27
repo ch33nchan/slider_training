@@ -169,10 +169,11 @@ class GazeSliderInference:
             max_scale = self.DEFAULT_MAX_SCALE
 
         # Map joystick coords → LivePortrait eyeball_direction
-        # gaze_x: +1=left → eyeball_direction_x = +max_scale (iris shifts left in frame)
-        # gaze_y: +1=up   → eyeball_direction_y = -max_scale (sign flip: LP y=+ is down)
-        eye_dir_x = float(gaze_x) * max_scale
-        eye_dir_y = float(-gaze_y) * max_scale  # sign flip for y
+        # Empirically determined sign convention (LP internal axes differ from ours):
+        # gaze_x=+1 (look left)  → eye_dir_x = -max_scale
+        # gaze_y=+1 (look up)    → eye_dir_y = +max_scale
+        eye_dir_x = float(-gaze_x) * max_scale
+        eye_dir_y = float(gaze_y) * max_scale
 
         print(f"[GazeWarp] gaze=({gaze_x:+.2f},{gaze_y:+.2f})  "
               f"LP_dir=({eye_dir_x:+.1f},{eye_dir_y:+.1f})")
