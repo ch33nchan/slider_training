@@ -55,11 +55,6 @@ LIGHTINGS = [
     "high key bright studio lighting, white background",
 ]
 
-NEGATIVE_PROMPT = (
-    "blurry, soft focus, painting, illustration, cartoon, anime, CGI, "
-    "deformed, disfigured, extra limbs, watermark, text"
-)
-
 def build_prompts():
     prompts = []
     for subject in SUBJECTS:
@@ -108,7 +103,6 @@ def worker(gpu_id: int, indices: list, prompts: list, outdir: str,
         with torch.no_grad():
             image = pipe(
                 prompt=prompt,
-                negative_prompt=NEGATIVE_PROMPT,
                 num_inference_steps=steps,
                 guidance_scale=guidance,
                 height=size,
