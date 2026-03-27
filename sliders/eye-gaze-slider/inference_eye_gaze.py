@@ -119,8 +119,10 @@ class GazeSliderInference:
                     train_method, device, dtype):
         """Load FLUX pipeline + LoRA networks for refinement pass."""
         print("[GazeWarp] Loading FLUX pipeline for refinement …")
-        _flux_root = _HERE.parents[1]  # slider_training/
-        sys.path.insert(0, str(_flux_root / "flux-sliders"))
+        _flux_root = _HERE.parents[0]  # sliders/
+        _lora_path = str(_flux_root / "flux-sliders")
+        if _lora_path not in sys.path:
+            sys.path.insert(0, _lora_path)
         from utils.lora import LoRANetwork  # noqa
 
         try:
