@@ -104,14 +104,19 @@ class GazeSliderInference:
         self._load_pipeline(model_id)
 
         # --- Attach LoRA sliders to the already-loaded transformer ---
-        print("[GazeSlider] Attaching LoRA networks …")
+        # Auto-detect rank from checkpoint so rank=4 vs rank=8 mismatches
+        # are handled transparently.
+        rank_h = self._peek_rank(lora_h) if lora_h else rank
+        rank_v = self._peek_rank(lora_v) if lora_v else rank
+
+        print(f"[GazeSlider] Attaching LoRA networks  rank_h={rank_h}  rank_v={rank_v} …")
         self.network_h = LoRANetwork(
             self.pipe.transformer,
-            rank=rank, multiplier=0.0, alpha=alpha, train_method=train_method
+            rank=rank_h, multiplier=0.0, alpha=alpha, train_method=train_method
         ).to(self.device).to(self.dtype)
         self.network_v = LoRANetwork(
             self.pipe.transformer,
-            rank=rank, multiplier=0.0, alpha=alpha, train_method=train_method
+            rank=rank_v, multiplier=0.0, alpha=alpha, train_method=train_method
         ).to(self.device).to(self.dtype)
 
         if lora_h:
@@ -129,6 +134,23 @@ class GazeSliderInference:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _peek_rank(path: Union[str, Path]) -> int:
+        """Read the first lora_down weight from a checkpoint and return its rank."""
+        path = Path(path)
+        if path.suffix == ".safetensors":
+            from safetensors import safe_open
+            with safe_open(str(path), framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    if "lora_down" in key:
+                        return f.get_tensor(key).shape[0]
+        else:
+            state = torch.load(str(path), map_location="cpu", weights_only=True)
+            for key, val in state.items():
+                if "lora_down" in key:
+                    return val.shape[0]
+        return 4  # fallback
 
     def _load_pipeline(self, model_id: str) -> None:
         """Load Flux2KleinPipeline — supports image+prompt img2img natively."""
