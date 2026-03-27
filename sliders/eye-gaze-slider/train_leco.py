@@ -182,8 +182,10 @@ def encode_image(img_path: Path, vae, resolution: int,
     """
     pixel_values = preprocess_image(img_path, resolution).to(device, dtype)
     latents = vae.encode(pixel_values).latent_dist.sample()
-    scale_factor = vae.config.get("scaling_factor", 0.18215)
-    latents = latents * scale_factor
+    _cfg = dict(vae.config)  # FrozenDict overrides __getattr__ — convert first
+    scale_factor = _cfg.get("scaling_factor", 0.18215)
+    shift_factor  = _cfg.get("shift_factor",  0.0)
+    latents = (latents - shift_factor) * scale_factor
     # pixel_unshuffle: [B, C, H, W] → [B, C*4, H/2, W/2]
     latents = F.pixel_unshuffle(latents, 2)
     return latents   # [1, 128, res//16, res//16]
