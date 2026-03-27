@@ -51,14 +51,24 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--input",  default="gaze_test_input.png")
     p.add_argument("--device", default="cuda")
-    p.add_argument("--scale",  type=float, default=20.0,
-                   help="LivePortrait eyeball_direction max value (default 20)")
+    p.add_argument("--scale",  type=float, default=12.0,
+                   help="LivePortrait eyeball_direction max value (default 12)")
     p.add_argument("--outdir", default="/tmp")
+    p.add_argument("--lora_h", default=None,
+                   help="Path to horizontal gaze LoRA .safetensors")
+    p.add_argument("--lora_v", default=None,
+                   help="Path to vertical gaze LoRA .safetensors")
+    p.add_argument("--refine_strength", type=float, default=0.0,
+                   help="FLUX img2img refinement strength (0=off, 0.10-0.15 recommended)")
     args = p.parse_args()
 
     # ── load engine ──────────────────────────────────────────────────────────
-    print("Loading LivePortrait engine …")
-    engine = GazeSliderInference(device=args.device)
+    print("Loading engine …")
+    engine = GazeSliderInference(
+        lora_h=args.lora_h,
+        lora_v=args.lora_v,
+        device=args.device,
+    )
 
     # ── load input image ─────────────────────────────────────────────────────
     inp_path = Path(args.input)
@@ -86,7 +96,8 @@ def main():
             extreme_imgs.append(img.resize(out_size, Image.LANCZOS))
         else:
             out = engine.apply_gaze(img, gaze_x=gx, gaze_y=gy,
-                                    max_scale=args.scale)
+                                    max_scale=args.scale,
+                                    strength=args.refine_strength)
             extreme_imgs.append(out.resize(out_size, Image.LANCZOS))
 
     strip1 = make_strip(extreme_imgs, [c[0] for c in extreme_cases])
@@ -110,7 +121,8 @@ def main():
             moderate_imgs.append(img.resize(out_size, Image.LANCZOS))
         else:
             out = engine.apply_gaze(img, gaze_x=gx, gaze_y=gy,
-                                    max_scale=args.scale)
+                                    max_scale=args.scale,
+                                    strength=args.refine_strength)
             moderate_imgs.append(out.resize(out_size, Image.LANCZOS))
 
     strip2 = make_strip(moderate_imgs, [c[0] for c in moderate_cases])

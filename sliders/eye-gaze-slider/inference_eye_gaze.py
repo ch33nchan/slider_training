@@ -28,6 +28,8 @@ from typing import Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 from PIL import Image
 
 # ── Find LivePortrait root ────────────────────────────────────────────────────
@@ -79,13 +81,13 @@ class GazeSliderInference:
     def __init__(
         self,
         model_id: str = "black-forest-labs/FLUX.2-klein-9B",
-        lora_h=None,          # ignored — kept for backward compat
-        lora_v=None,          # ignored
-        rank: int = 8,        # ignored
-        alpha: float = 4.0,   # ignored
-        train_method: str = "noxattn",  # ignored
+        lora_h=None,
+        lora_v=None,
+        rank: int = 8,
+        alpha: float = 4.0,
+        train_method: str = "noxattn",
         device: str = "cuda",
-        dtype=None,           # ignored
+        dtype=None,
     ):
         use_half = (device != "cpu")
         inference_cfg = InferenceConfig(flag_use_half_precision=use_half)
@@ -104,6 +106,197 @@ class GazeSliderInference:
         self._source_eye_ratio: float = 0.0
         self._source_lip_ratio: float = 0.0
         self._tmp_path: Optional[str] = None  # reusable temp file
+
+        # ── Optional FLUX refinement ─────────────────────────────────────────
+        self._flux_ready = False
+        if lora_h or lora_v:
+            self._setup_flux(model_id, lora_h, lora_v, rank, alpha,
+                             train_method, device, dtype)
+
+    # ── FLUX setup ────────────────────────────────────────────────────────────
+
+    def _setup_flux(self, model_id, lora_h, lora_v, rank, alpha,
+                    train_method, device, dtype):
+        """Load FLUX pipeline + LoRA networks for refinement pass."""
+        print("[GazeWarp] Loading FLUX pipeline for refinement …")
+        _flux_root = _HERE.parents[1]  # slider_training/
+        sys.path.insert(0, str(_flux_root / "flux-sliders"))
+        from utils.lora import LoRANetwork  # noqa
+
+        try:
+            from diffusers import Flux2KleinPipeline as _FP
+        except ImportError:
+            from diffusers import FluxPipeline as _FP
+
+        self._flux_dtype = torch.float16 if device != "cpu" else torch.float32
+        pipe = _FP.from_pretrained(model_id,
+                                   torch_dtype=self._flux_dtype)
+        pipe.to(device)
+        self._transformer = pipe.transformer
+        self._transformer.requires_grad_(False)
+        self._vae = pipe.vae
+        self._vae.requires_grad_(False)
+        self._vae.eval()
+        self._flux_pipe   = pipe          # keep alive for encode_text
+        self._flux_device = torch.device(device)
+
+        # VAE scale / shift
+        _cfg = dict(self._vae.config)
+        self._vae_scale = _cfg.get("scaling_factor", 0.18215)
+        self._vae_shift = _cfg.get("shift_factor",  0.0)
+
+        # Static geometry for 512×512 images
+        self._spatial  = 32   # 512 // 16
+        self._img_ids  = self._prepare_img_ids(1, 32, 32, device,
+                                               self._flux_dtype)
+
+        # Neutral text embedding (cached)
+        self._seq_emb, self._pooled_emb, self._txt_ids = \
+            self._encode_text("portrait photograph", device, self._flux_dtype)
+
+        # LoRA networks
+        self._net_h: Optional[object] = None
+        self._net_v: Optional[object] = None
+
+        for path, axis in [(lora_h, "H"), (lora_v, "V")]:
+            if not path:
+                continue
+            net = LoRANetwork(
+                self._transformer,
+                rank=rank,
+                multiplier=0.0,
+                alpha=alpha,
+                train_method=train_method,
+            ).to(device=device, dtype=self._flux_dtype)
+            from safetensors.torch import load_file
+            state = load_file(path)
+            net.load_state_dict(state, strict=False)
+            net.eval()
+            if axis == "H":
+                self._net_h = net
+            else:
+                self._net_v = net
+            print(f"[GazeWarp] LoRA-{axis} loaded from {path}")
+
+        self._flux_ready = True
+        print("[GazeWarp] FLUX refinement ready.")
+
+    @staticmethod
+    def _prepare_img_ids(B, H, W, device, dtype):
+        h_idx  = torch.arange(H, device=device, dtype=dtype)
+        w_idx  = torch.arange(W, device=device, dtype=dtype)
+        gh, gw = torch.meshgrid(h_idx, w_idx, indexing="ij")
+        ids    = torch.zeros(B, H * W, 4, device=device, dtype=dtype)
+        ids[:, :, 2] = gh.reshape(-1).unsqueeze(0).expand(B, -1)
+        ids[:, :, 3] = gw.reshape(-1).unsqueeze(0).expand(B, -1)
+        return ids
+
+    @torch.no_grad()
+    def _encode_text(self, prompt, device, dtype):
+        import inspect
+        sig = inspect.signature(self._flux_pipe.encode_prompt).parameters
+        kw  = dict(prompt=prompt, device=device, num_images_per_prompt=1)
+        if "prompt_2" in sig:
+            kw["prompt_2"] = None
+        result = self._flux_pipe.encode_prompt(**kw)
+        seq, pooled = result[0], result[1]
+        txt_ids = result[2] if len(result) > 2 else None
+        seq     = seq.to(dtype)
+        pooled  = pooled.to(dtype) if pooled is not None else None
+        if txt_ids is None:
+            txt_ids = torch.zeros(seq.shape[0], seq.shape[1], 4,
+                                  device=device, dtype=dtype)
+        else:
+            txt_ids = txt_ids.to(dtype)
+        return seq, pooled, txt_ids
+
+    @staticmethod
+    def _call_transformer(transformer, x_packed, seq_emb, pooled_emb,
+                          t_norm, img_ids, txt_ids):
+        import inspect
+        sig = inspect.signature(transformer.forward).parameters
+        kw: dict = {"hidden_states": x_packed, "return_dict": False}
+        if "encoder_hidden_states" in sig:
+            kw["encoder_hidden_states"] = seq_emb
+        if "timestep" in sig:
+            kw["timestep"] = t_norm
+        if pooled_emb is not None and "pooled_projections" in sig:
+            kw["pooled_projections"] = pooled_emb
+        if img_ids is not None and "img_ids" in sig:
+            kw["img_ids"] = img_ids
+        if txt_ids is not None and "txt_ids" in sig:
+            kw["txt_ids"] = txt_ids
+        return transformer(**kw)[0]
+
+    @torch.no_grad()
+    def _refine_with_flux(self, img: Image.Image, gaze_x: float,
+                          gaze_y: float, strength: float) -> Image.Image:
+        """FLUX img2img refinement with gaze LoRAs active."""
+        if strength < 0.01 or not self._flux_ready:
+            return img
+
+        dev, dtype = self._flux_device, self._flux_dtype
+
+        # ── Encode image → latents ─────────────────────────────────────────
+        pv = TF.to_tensor(img.convert("RGB").resize((512, 512),
+                          Image.LANCZOS)).unsqueeze(0).to(dev, dtype)
+        pv = pv * 2.0 - 1.0
+        z0 = self._vae.encode(pv).latent_dist.sample()
+        z0 = (z0 - self._vae_shift) * self._vae_scale
+        z0 = F.pixel_unshuffle(z0, 2)   # [1,128,32,32]
+
+        # ── Add noise at t=strength ────────────────────────────────────────
+        eps = torch.randn_like(z0)
+        t   = float(strength)
+        z_t = (1.0 - t) * z0 + t * eps
+
+        # ── Euler denoising with LoRAs ─────────────────────────────────────
+        n_steps = max(1, round(t * 8))
+        dt      = t / n_steps
+        t_cur   = t
+
+        # Activate LoRAs with gaze direction as scale
+        if self._net_h is not None:
+            self._net_h.set_lora_slider(scale=float(gaze_x))
+        if self._net_v is not None:
+            self._net_v.set_lora_slider(scale=float(gaze_y))
+
+        def _step(z):
+            nonlocal t_cur
+            t_norm   = torch.tensor([t_cur], device=dev, dtype=dtype)
+            x_packed = z.reshape(1, 128, -1).permute(0, 2, 1)  # [1,HW,C]
+            vel_packed = self._call_transformer(
+                self._transformer, x_packed,
+                self._seq_emb, self._pooled_emb,
+                t_norm, self._img_ids, self._txt_ids,
+            )
+            vel = vel_packed.permute(0, 2, 1).reshape_as(z)
+            t_cur -= dt
+            return z - dt * vel
+
+        if self._net_h is not None and self._net_v is not None:
+            with self._net_h:
+                with self._net_v:
+                    for _ in range(n_steps):
+                        z_t = _step(z_t)
+        elif self._net_h is not None:
+            with self._net_h:
+                for _ in range(n_steps):
+                    z_t = _step(z_t)
+        elif self._net_v is not None:
+            with self._net_v:
+                for _ in range(n_steps):
+                    z_t = _step(z_t)
+
+        # ── Decode ────────────────────────────────────────────────────────
+        z_dec = F.pixel_shuffle(z_t, 2)        # [1,32,64,64]
+        z_dec = z_dec / self._vae_scale + self._vae_shift
+        out_t = self._vae.decode(z_dec).sample  # [1,3,512,512]
+        out_t = (out_t.clamp(-1, 1) + 1.0) / 2.0
+        out_np = (out_t[0].permute(1, 2, 0).cpu().float().numpy() * 255
+                  ).astype(np.uint8)
+        # Resize back to original input dimensions
+        return Image.fromarray(out_np).resize(img.size, Image.LANCZOS)
 
     # ── internal helpers ──────────────────────────────────────────────────────
 
@@ -231,8 +424,15 @@ class GazeSliderInference:
 
         # Convert output to PIL (paste_back returns numpy uint8 HWC RGB)
         if isinstance(out_blended, np.ndarray):
-            return Image.fromarray(out_blended)
-        return out_blended  # already PIL in some LP versions
+            result = Image.fromarray(out_blended)
+        else:
+            result = out_blended  # already PIL in some LP versions
+
+        # Optional FLUX refinement pass (sharpens skin, amplifies gaze drama)
+        if strength and strength > 0.01 and self._flux_ready:
+            result = self._refine_with_flux(result, gaze_x, gaze_y, strength)
+
+        return result
 
     def apply_gaze_batch(self, image, gaze_coords, **kwargs):
         return [self.apply_gaze(image, gx, gy, **kwargs) for gx, gy in gaze_coords]
