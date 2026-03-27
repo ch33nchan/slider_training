@@ -263,6 +263,16 @@ class GazeSliderInference:
         self.network_h.set_lora_slider(scale=scale_h)
         self.network_v.set_lora_slider(scale=scale_v)
 
+        # ── Sanity-check: confirm LoRA modifies transformer output ──────────
+        _blk  = self.pipe.transformer.transformer_blocks[0].attn.to_q
+        _x    = torch.zeros(1, _blk.weight.shape[1], device=self.device, dtype=self.dtype)
+        _base = _blk(_x).abs().sum().item()
+        with self.network_h:
+            _lora = _blk(_x).abs().sum().item()
+        print(f"[LoRA-check] base={_base:.4f}  with_lora={_lora:.4f}  "
+              f"diff={abs(_lora-_base):.6f}  (0=LoRA not applied)")
+        # ────────────────────────────────────────────────────────────────────
+
         with self.network_h, self.network_v:
             result = self.pipe(
                 image=image_resized,
