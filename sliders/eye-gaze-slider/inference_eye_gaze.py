@@ -265,7 +265,7 @@ class GazeSliderInference:
 
         # ── Sanity-check: confirm LoRA modifies transformer output ──────────
         _blk  = self.pipe.transformer.transformer_blocks[0].attn.to_q
-        _x    = torch.zeros(1, _blk.weight.shape[1], device=self.device, dtype=self.dtype)
+        _x    = torch.randn(1, _blk.weight.shape[1], device=self.device, dtype=self.dtype)
         _base = _blk(_x).abs().sum().item()
         with self.network_h:
             _lora = _blk(_x).abs().sum().item()

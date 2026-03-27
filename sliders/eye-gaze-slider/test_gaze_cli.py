@@ -58,7 +58,7 @@ def run(pipe, network, image, prompt, scale, steps, device, dtype, seed=42):
 
     # Sanity: measure LoRA effect on first to_q
     blk = pipe.transformer.transformer_blocks[0].attn.to_q
-    x   = torch.zeros(1, blk.weight.shape[1], device=device, dtype=dtype)
+    x   = torch.randn(1, blk.weight.shape[1], device=device, dtype=dtype)
     base = blk(x).abs().sum().item()
     with network:
         lora_out = blk(x).abs().sum().item()
