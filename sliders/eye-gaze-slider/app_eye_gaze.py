@@ -2,16 +2,13 @@
 app_eye_gaze.py
 ---------------
 Gradio app for interactive eye-gaze redirection using LivePortrait's
-3D keypoint manipulation (no LoRA required).
+3D keypoint manipulation.  No LoRA required.
 
-UI layout:
-  - Head / Eye / Mouth tabs  (only Eye is wired for now)
-  - 2D joystick canvas  (HTML/JS, dark theme, blue dot)
-  - Gaze Intensity slider  (eyeball_direction scale, 5–30, default 20)
-  - Open/Close Eyes slider
-  - Raise/Lower Eyebrows slider
-  - Reset + Apply buttons
-  - Input image (left) | Output image (right)
+Controls:
+  - 2D joystick  →  gaze direction (drag to aim)
+  - Open / Close Eyes slider
+  - Raise / Lower Eyebrows slider
+  - Gaze Intensity  (LivePortrait eyeball_direction scale, default 12)
 
 Run:
     python app_eye_gaze.py --port 7860
@@ -25,30 +22,22 @@ from pathlib import Path
 import gradio as gr
 
 # ---------------------------------------------------------------------------
-# Lazy import of inference engine so Gradio can start without blocking GPU
+# Lazy engine load
 # ---------------------------------------------------------------------------
 _engine = None
 
 
-def get_engine(model_id: str, lora_h: str, lora_v: str,
-               rank: int, alpha: float) -> "GazeSliderInference":  # noqa: F821
+def get_engine(device: str = "cuda"):
     global _engine
     if _engine is None:
-        # Import here so startup is fast if models aren't ready yet
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from inference_eye_gaze import GazeSliderInference  # noqa
-        _engine = GazeSliderInference(
-            model_id=model_id,
-            lora_h=lora_h if lora_h else None,
-            lora_v=lora_v if lora_v else None,
-            rank=rank,
-            alpha=alpha,
-        )
+        from inference_eye_gaze import GazeSliderInference
+        _engine = GazeSliderInference(device=device)
     return _engine
 
 
 # ===========================================================================
-# 2-D joystick HTML + JavaScript
+# 2-D joystick HTML + JS
 # ===========================================================================
 
 JOYSTICK_HTML = """
@@ -58,21 +47,17 @@ JOYSTICK_HTML = """
     style="cursor:crosshair;border-radius:10px;display:block;touch-action:none;background:#1a1a1a;">
   </canvas>
   <div style="color:#888;font-size:11px;letter-spacing:0.04em;text-align:center;">
-    DRAG  to set eye gaze direction
+    DRAG to set gaze direction
   </div>
 </div>
 """
 
-# ---------------------------------------------------------------------------
-# Joystick init JS — run via demo.load(js=...) so Gradio actually executes it.
-# (Scripts in gr.HTML are set via innerHTML and browsers skip them silently.)
-# ---------------------------------------------------------------------------
 JOYSTICK_INIT_JS = """
 () => {
   function initJoystick() {
     const canvas = document.getElementById('gaze-joystick');
     if (!canvas) { setTimeout(initJoystick, 80); return; }
-    if (canvas._gazeInit) return;   // already initialised
+    if (canvas._gazeInit) return;
     canvas._gazeInit = true;
 
     const W = 220, H = 220, CX = W/2, CY = H/2;
@@ -82,8 +67,7 @@ JOYSTICK_INIT_JS = """
 
     function rrect(x, y, w, h, r) {
       ctx.beginPath();
-      ctx.moveTo(x+r, y);
-      ctx.lineTo(x+w-r, y);
+      ctx.moveTo(x+r, y); ctx.lineTo(x+w-r, y);
       ctx.arc(x+w-r, y+r,   r, -Math.PI/2, 0);
       ctx.lineTo(x+w, y+h-r);
       ctx.arc(x+w-r, y+h-r, r,  0,          Math.PI/2);
@@ -156,39 +140,20 @@ JOYSTICK_INIT_JS = """
 
 RESET_JS = """
 () => {
-  if (typeof window.resetGazeJoystick === 'function') {
-    window.resetGazeJoystick();
-  }
+  if (typeof window.resetGazeJoystick === 'function') window.resetGazeJoystick();
   return [0, 0];
 }
 """
 
 # ===========================================================================
-# Gradio inference callback
+# Inference callback
 # ===========================================================================
 
-def run_inference(
-    input_image,
-    gaze_x: float,
-    gaze_y: float,
-    eye_open: float,
-    brow_raise: float,
-    strength: float,
-    lora_intensity: float,
-    num_steps: int,
-    prompt: str,
-    # these are injected by the app.launch closure:
-    _model_id: str,
-    _lora_h: str,
-    _lora_v: str,
-    _rank: int,
-    _alpha: float,
-):
+def run_inference(input_image, gaze_x, gaze_y, eye_open, brow_raise, intensity, device):
     if input_image is None:
-        return None, "⚠ Please upload an input image first."
-
+        return None, "⚠ Upload a portrait first."
     try:
-        engine = get_engine(_model_id, _lora_h, _lora_v, _rank, _alpha)
+        engine = get_engine(device)
         from PIL import Image as PILImage
         if not isinstance(input_image, PILImage.Image):
             input_image = PILImage.fromarray(input_image)
@@ -199,71 +164,45 @@ def run_inference(
             gaze_y=float(gaze_y),
             eye_open=float(eye_open),
             brow_raise=float(brow_raise),
-            prompt=prompt,
-            strength=float(strength),
-            num_inference_steps=int(num_steps),
-            max_scale=float(lora_intensity),
-            guidance_scale=0.0,
+            max_scale=float(intensity),
         )
-        status = (
-            f"✓ Done  |  gaze ({gaze_x:+.2f}, {gaze_y:+.2f})  "
-            f"eye_open={eye_open:+.2f}  brow={brow_raise:+.2f}  "
-            f"strength={strength:.2f}  intensity={lora_intensity:.1f}"
-        )
+        status = (f"✓  gaze ({float(gaze_x):+.2f}, {float(gaze_y):+.2f})  "
+                  f"eye_open={float(eye_open):+.2f}  brow={float(brow_raise):+.2f}  "
+                  f"intensity={float(intensity):.0f}")
         return out, status
-
     except Exception as e:
         import traceback
-        return None, f"❌ Error: {e}\n{traceback.format_exc()}"
+        return None, f"❌ {e}\n{traceback.format_exc()}"
 
 
 # ===========================================================================
-# Build Gradio UI
+# Build UI
 # ===========================================================================
 
-def build_app(model_id, lora_h, lora_v, rank, alpha):
+def build_app(device: str = "cuda"):
 
-    # Wrap inference so CLI args are baked in without globals
-    def _infer(img, gx, gy, eye_open, brow_raise, strength, intensity, steps, prompt):
-        return run_inference(img, gx, gy, eye_open, brow_raise, strength, intensity,
-                             steps, prompt, model_id, lora_h, lora_v, rank, alpha)
+    def _infer(img, gx, gy, eye_open, brow_raise, intensity):
+        return run_inference(img, gx, gy, eye_open, brow_raise, intensity, device)
 
-    with gr.Blocks(title="Eye Gaze Slider — FLUX.2-klein") as demo:
+    with gr.Blocks(title="Eye Gaze — LivePortrait") as demo:
 
-        gr.Markdown(
-            "## 👁  Eye Gaze & Expressions  —  FLUX.2-klein",
-            elem_id="title",
-        )
+        gr.Markdown("## 👁  Eye Gaze & Expressions  —  LivePortrait")
 
         with gr.Row():
-            # ---------------------------------------------------------------
-            # LEFT — Input image
-            # ---------------------------------------------------------------
-            with gr.Column(scale=1):
-                input_img = gr.Image(
-                    label="Input Portrait",
-                    type="pil",
-                    height=480,
-                )
 
-            # ---------------------------------------------------------------
-            # CENTRE — Controls
-            # ---------------------------------------------------------------
+            # ── INPUT ────────────────────────────────────────────────────────
+            with gr.Column(scale=1):
+                input_img = gr.Image(label="Input Portrait", type="pil", height=480)
+
+            # ── CONTROLS ─────────────────────────────────────────────────────
             with gr.Column(scale=1, min_width=280):
 
-                # Tab bar (Head / Eye / Mouth  — only Eye is active)
                 with gr.Tabs():
-                    with gr.Tab("🗣 Head", interactive=False):
-                        gr.Markdown("*Head pose controls — coming soon*")
-
                     with gr.Tab("👁 Eye"):
 
-                        # 2-D joystick
                         gr.HTML(JOYSTICK_HTML)
 
-                        # Hidden Number components that JS writes to
-                        # visible=True so Gradio keeps these in the DOM;
-                        # they are hidden purely via CSS (.gaze-hidden class)
+                        # Hidden number inputs written by JS
                         gaze_x_val = gr.Number(
                             value=0.0, elem_id="gaze-x-val", label="gaze_x",
                             elem_classes=["gaze-hidden"],
@@ -276,94 +215,55 @@ def build_app(model_id, lora_h, lora_v, rank, alpha):
                         eye_open_sl = gr.Slider(
                             label="Open / Close Eyes",
                             minimum=-1.0, maximum=1.0, step=0.05, value=0.0,
-                            info="-1 = close  ·  0 = neutral  ·  +1 = open",
+                            info="-1 = close  ·  0 = neutral  ·  +1 = wide open",
                         )
                         brow_raise_sl = gr.Slider(
                             label="Raise / Lower Eyebrows",
                             minimum=-1.0, maximum=1.0, step=0.05, value=0.0,
                             info="-1 = lower  ·  0 = neutral  ·  +1 = raise",
                         )
-
-                        gr.Markdown("---")
-
-                        strength_sl = gr.Slider(
-                            label="Flux Refine Strength",
-                            minimum=0.0, maximum=0.4, step=0.05, value=0.0,
-                            info="0 = LivePortrait only · >0 adds a Flux smoothing pass (slow)",
-                        )
                         intensity_sl = gr.Slider(
                             label="Gaze Intensity",
-                            minimum=5.0, maximum=30.0, step=1.0, value=20.0,
-                            info="LivePortrait eyeball_direction scale (20 = full range)",
-                        )
-                        steps_sl = gr.Slider(
-                            label="Inference Steps",
-                            minimum=4, maximum=50, step=1, value=8,
-                            info="4–12 recommended for FLUX.2-klein (distilled)",
-                        )
-
-                        prompt_box = gr.Textbox(
-                            label="Style Prompt",
-                            value="professional portrait photograph, studio lighting, "
-                                  "photorealistic, sharp focus, high quality",
-                            lines=2,
+                            minimum=2.0, maximum=20.0, step=1.0, value=12.0,
+                            info="Higher = more extreme gaze shift (12 recommended)",
                         )
 
                         with gr.Row():
-                            reset_btn = gr.Button("Reset", variant="secondary")
-                            apply_btn = gr.Button("Apply", variant="primary")
+                            reset_btn = gr.Button("↺  Reset", variant="secondary")
+                            apply_btn = gr.Button("▶  Apply", variant="primary")
 
+                    with gr.Tab("🗣 Head", interactive=False):
+                        gr.Markdown("*Head pose — coming soon*")
                     with gr.Tab("👄 Mouth", interactive=False):
                         gr.Markdown("*Mouth controls — coming soon*")
 
-                # Status bar
                 status_box = gr.Textbox(
                     label="Status", value="Idle", interactive=False,
                     lines=1, elem_id="status-box",
                 )
 
-            # ---------------------------------------------------------------
-            # RIGHT — Output image
-            # ---------------------------------------------------------------
+            # ── OUTPUT ───────────────────────────────────────────────────────
             with gr.Column(scale=1):
                 output_img = gr.Image(
-                    label="Output",
-                    type="pil",
-                    height=480,
-                    interactive=False,
+                    label="Output", type="pil", height=480, interactive=False,
                 )
 
-        # -------------------------------------------------------------------
-        # Event wiring
-        # -------------------------------------------------------------------
-
-        # Apply button → run inference
+        # ── Wiring ───────────────────────────────────────────────────────────
         apply_btn.click(
             fn=_infer,
-            inputs=[
-                input_img, gaze_x_val, gaze_y_val,
-                eye_open_sl, brow_raise_sl,
-                strength_sl, intensity_sl, steps_sl, prompt_box,
-            ],
+            inputs=[input_img, gaze_x_val, gaze_y_val,
+                    eye_open_sl, brow_raise_sl, intensity_sl],
             outputs=[output_img, status_box],
         )
-
-        # Reset button → JS recentres dot + zero hidden numbers
         reset_btn.click(
             fn=lambda: (0.0, 0.0),
             inputs=[],
             outputs=[gaze_x_val, gaze_y_val],
             js=RESET_JS,
         )
+        gaze_x_val.change(fn=None, inputs=[], outputs=[])
+        gaze_y_val.change(fn=None, inputs=[], outputs=[])
 
-        # Optional: live preview on joystick release
-        # (fires whenever gaze_x_val or gaze_y_val changes via JS)
-        gaze_x_val.change(fn=None, inputs=[], outputs=[])  # placeholder
-        gaze_y_val.change(fn=None, inputs=[], outputs=[])  # placeholder
-
-        # ---- Initialise joystick canvas via Gradio's JS hook ----
-        # gr.HTML scripts are inserted via innerHTML and browsers skip them;
-        # demo.load(js=...) is the correct way to run JS in Gradio 4.x.
         demo.load(fn=None, js=JOYSTICK_INIT_JS)
 
     return demo
@@ -374,27 +274,17 @@ def build_app(model_id, lora_h, lora_v, rank, alpha):
 # ===========================================================================
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Eye Gaze Slider Gradio App")
-    p.add_argument("--model_id",  default="black-forest-labs/FLUX.2-klein-9B")
-    p.add_argument("--lora_h",    default="",  help="Path to horizontal gaze LoRA .safetensors")
-    p.add_argument("--lora_v",    default="",  help="Path to vertical gaze LoRA .safetensors")
-    p.add_argument("--rank",      type=int,   default=4)
-    p.add_argument("--alpha",     type=float, default=1.0)
-    p.add_argument("--port",      type=int,   default=7860)
-    p.add_argument("--share",     action="store_true", help="Create public Gradio share link")
-    p.add_argument("--server",    default="0.0.0.0", help="Server hostname (0.0.0.0 for GPU server)")
+    p = argparse.ArgumentParser()
+    p.add_argument("--device", default="cuda")
+    p.add_argument("--port",   type=int, default=7860)
+    p.add_argument("--server", default="0.0.0.0")
+    p.add_argument("--share",  action="store_true")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    demo = build_app(
-        model_id=args.model_id,
-        lora_h=args.lora_h or None,
-        lora_v=args.lora_v or None,
-        rank=args.rank,
-        alpha=args.alpha,
-    )
+    demo = build_app(device=args.device)
     demo.launch(
         server_name=args.server,
         server_port=args.port,

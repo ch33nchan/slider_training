@@ -73,8 +73,8 @@ class GazeSliderInference:
     """
 
     # LivePortrait eyeball_direction values that feel "full-range"
-    # (can be tuned; ±20 is the default Gradio slider range)
-    DEFAULT_MAX_SCALE: float = 20.0
+    # ±12 keeps gaze visible while minimising whole-face translation drift
+    DEFAULT_MAX_SCALE: float = 12.0
 
     def __init__(
         self,
@@ -144,12 +144,12 @@ class GazeSliderInference:
     def apply_gaze(
         self,
         image: Image.Image,
-        gaze_x: float = 0.0,   # +1 = look left,  −1 = look right
-        gaze_y: float = 0.0,   # +1 = look up,    −1 = look down
-        eye_open: float = 0.0,    # placeholder — not yet implemented
-        brow_raise: float = 0.0,  # maps to LivePortrait 'eyebrow'
-        strength: float = 0.0,    # reserved for future Flux refinement pass
-        max_scale: float = None,  # pixel shift scale (default: 20.0)
+        gaze_x: float = 0.0,     # +1 = look left,  −1 = look right
+        gaze_y: float = 0.0,     # +1 = look up,    −1 = look down
+        eye_open: float = 0.0,   # +1 = wider open, −1 = squint/close
+        brow_raise: float = 0.0, # +1 = raise brows, −1 = lower brows
+        strength: float = 0.0,   # reserved for future Flux refinement pass
+        max_scale: float = None,
         retargeting_source_scale: float = 2.3,
         seed: Optional[int] = None,
         **kwargs,
@@ -157,10 +157,10 @@ class GazeSliderInference:
         """
         Return a new PIL image with the eye gaze redirected.
 
-        gaze_x = +1  →  look left
-        gaze_x = -1  →  look right
-        gaze_y = +1  →  look up
-        gaze_y = -1  →  look down
+        gaze_x = +1  →  look left      gaze_x = -1  →  look right
+        gaze_y = +1  →  look up        gaze_y = -1  →  look down
+        eye_open = +1 → eyes wider     eye_open = -1 → eyes closed
+        brow_raise = +1 → raise brows  brow_raise = -1 → lower brows
         """
         gaze_x = max(-1.0, min(1.0, float(gaze_x)))
         gaze_y = max(-1.0, min(1.0, float(gaze_y)))
@@ -178,21 +178,33 @@ class GazeSliderInference:
         print(f"[GazeWarp] gaze=({gaze_x:+.2f},{gaze_y:+.2f})  "
               f"LP_dir=({eye_dir_x:+.1f},{eye_dir_y:+.1f})")
 
-        if abs(eye_dir_x) < 0.05 and abs(eye_dir_y) < 0.05:
-            print("[GazeWarp] Gaze near-zero, returning original.")
-            return image
-
         # Write input to temp file (LivePortrait needs a file path)
         img_path = self._img_to_tmp(image.convert("RGB"))
 
         # Init source (face detection + ratio extraction)
         eye_r, lip_r = self._init_source(img_path, scale=retargeting_source_scale)
 
+        # eye_open slider: ±1 maps to ±0.15 delta on top of natural eye ratio
+        # clamp to valid range [0.0, 0.5]
+        eye_open  = max(-1.0, min(1.0, float(eye_open)))
+        target_eye_ratio = float(np.clip(eye_r + eye_open * 0.15, 0.0, 0.5))
+
+        # skip the whole pipeline if nothing will change
+        no_gaze   = abs(eye_dir_x) < 0.05 and abs(eye_dir_y) < 0.05
+        no_eye    = abs(target_eye_ratio - eye_r) < 0.005
+        no_brow   = abs(brow_raise) < 0.02
+        if no_gaze and no_eye and no_brow:
+            print("[GazeWarp] All sliders near-zero — returning original.")
+            return image
+
+        print(f"[GazeWarp] eye_ratio {eye_r:.3f} → {target_eye_ratio:.3f}  "
+              f"brow={brow_raise:+.2f}")
+
         # Run LivePortrait retargeting
         os.chdir(_LP_ROOT)
         try:
             _out_crop, out_blended = self.pipeline.execute_image_retargeting(
-                input_eye_ratio=eye_r,
+                input_eye_ratio=target_eye_ratio,
                 input_lip_ratio=lip_r,
                 input_head_pitch_variation=0,
                 input_head_yaw_variation=0,
