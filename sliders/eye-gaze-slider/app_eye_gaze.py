@@ -1,22 +1,21 @@
 """
 app_eye_gaze.py
 ---------------
-Gradio app for interactive eye-gaze redirection using Flux.2-klein + LoRA sliders.
+Gradio app for interactive eye-gaze redirection using LivePortrait's
+3D keypoint manipulation (no LoRA required).
 
-UI layout (mirrors your LivePortrait screenshot):
+UI layout:
   - Head / Eye / Mouth tabs  (only Eye is wired for now)
   - 2D joystick canvas  (HTML/JS, dark theme, blue dot)
-  - Denoising Strength slider
-  - LoRA Intensity slider   (maps joystick ±1 → LoRA ±intensity)
+  - Gaze Intensity slider  (eyeball_direction scale, 5–30, default 20)
+  - Open/Close Eyes slider
+  - Raise/Lower Eyebrows slider
   - Reset + Apply buttons
   - Input image (left) | Output image (right)
 
 Run:
-    python app_eye_gaze.py \
-        --lora_h models/eye_gaze_horizontal_rank4_alpha1.0/last.safetensors \
-        --lora_v models/eye_gaze_vertical_rank4_alpha1.0/last.safetensors \
-        --model_id black-forest-labs/FLUX.2-klein-9B \
-        --port 7860
+    python app_eye_gaze.py --port 7860
+    python app_eye_gaze.py --port 7860 --server 0.0.0.0
 """
 
 import argparse
@@ -288,14 +287,14 @@ def build_app(model_id, lora_h, lora_v, rank, alpha):
                         gr.Markdown("---")
 
                         strength_sl = gr.Slider(
-                            label="Refine Strength",
+                            label="Flux Refine Strength",
                             minimum=0.0, maximum=0.4, step=0.05, value=0.0,
-                            info="0 = pure warp · >0 adds a Flux smoothing pass",
+                            info="0 = LivePortrait only · >0 adds a Flux smoothing pass (slow)",
                         )
                         intensity_sl = gr.Slider(
-                            label="Warp Intensity",
-                            minimum=1.0, maximum=10.0, step=0.5, value=5.0,
-                            info="Iris shift = intensity × 3 × |gaze|  pixels",
+                            label="Gaze Intensity",
+                            minimum=5.0, maximum=30.0, step=1.0, value=20.0,
+                            info="LivePortrait eyeball_direction scale (20 = full range)",
                         )
                         steps_sl = gr.Slider(
                             label="Inference Steps",

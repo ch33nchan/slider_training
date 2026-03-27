@@ -1,95 +1,80 @@
 """
 inference_eye_gaze.py
 ---------------------
-GazeSliderInference — MediaPipe iris detection + geometric warp to redirect
-eye gaze in a portrait, with an optional Flux2Klein refinement pass to
-clean up warp seams.
+GazeSliderInference — LivePortrait-based eye gaze redirection.
+
+Uses LivePortrait's 3D keypoint manipulation (eyeball_direction_x/y) for
+realistic holistic gaze control: iris + eyelid + sclera move together.
 
 No LoRA required.  Works deterministically.
 
 Usage:
     from inference_eye_gaze import GazeSliderInference
-    engine = GazeSliderInference("black-forest-labs/FLUX.2-klein-9B")
-    out = engine.apply_gaze(image, gaze_x=0.8, gaze_y=0.0, max_scale=5.0)
+    engine = GazeSliderInference()
+    out = engine.apply_gaze(image, gaze_x=0.8, gaze_y=0.0)
+
+Convention (matches LivePortrait UI):
+    gaze_x = +1  → look left    (eyeball_direction_x = +max_scale)
+    gaze_x = -1  → look right   (eyeball_direction_x = -max_scale)
+    gaze_y = +1  → look up      (eyeball_direction_y = -max_scale, sign flip)
+    gaze_y = -1  → look down    (eyeball_direction_y = +max_scale)
 """
 
+import os
 import sys
+import tempfile
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional
 
-import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F
 from PIL import Image
 
-try:
-    import mediapipe as mp
-    HAS_MEDIAPIPE = True
-except ImportError:
-    HAS_MEDIAPIPE = False
+# ── Find LivePortrait root ────────────────────────────────────────────────────
+_HERE = Path(__file__).resolve().parent
 
-try:
-    from diffusers import Flux2KleinPipeline
-except ImportError:
-    from diffusers import FluxPipeline as Flux2KleinPipeline   # fallback
+def _find_liveportrait() -> Path:
+    """Walk up from here and find the LivePortrait directory."""
+    candidates = [
+        _HERE.parents[1] / "LivePortrait",   # sliders/../LivePortrait
+        _HERE.parents[2] / "LivePortrait",   # sliders/../../LivePortrait
+        Path.home() / "Desktop" / "slider training" / "LivePortrait",
+    ]
+    for c in candidates:
+        if (c / "src" / "gradio_pipeline.py").exists():
+            return c
+    raise RuntimeError(
+        "Cannot find LivePortrait directory. "
+        "Expected it at ../LivePortrait relative to sliders/."
+    )
 
-# ── MediaPipe FaceMesh landmark indices ──────────────────────────────────────
-# These are only available when refine_landmarks=True
-LEFT_IRIS  = [468, 469, 470, 471, 472]
-RIGHT_IRIS = [473, 474, 475, 476, 477]
+_LP_ROOT = _find_liveportrait()
+if str(_LP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_LP_ROOT))
 
-# Eye outline — used to clamp the warp to the eye socket
-LEFT_EYE_OUTLINE  = [362, 382, 381, 380, 374, 373, 390, 249,
-                     263, 466, 388, 387, 386, 385, 384, 398]
-RIGHT_EYE_OUTLINE = [33,  7,  163, 144, 145, 153, 154, 155,
-                     133, 173, 157, 158, 159, 160, 161, 246]
+# ── Change cwd so LivePortrait's relative model paths resolve correctly ───────
+_ORIG_CWD = os.getcwd()
 
-
-# ── Core warp primitive ───────────────────────────────────────────────────────
-
-def _shift_iris(img_np: np.ndarray,
-                cx: float, cy: float, radius: float,
-                dx: float, dy: float) -> np.ndarray:
-    """
-    Shift the iris disc centred at (cx, cy) with the given pixel radius
-    by (dx, dy) pixels, with Gaussian feathering at the border.
-
-    dx > 0 → iris moves right in the output image
-    dy > 0 → iris moves down  in the output image
-    """
-    h, w  = img_np.shape[:2]
-    Y, X  = np.mgrid[0:h, 0:w].astype(np.float32)
-    dist  = np.sqrt((X - cx) ** 2 + (Y - cy) ** 2)
-
-    # Weight: 1.0 inside iris, smooth fall-off to 0 at 1.9 × radius
-    weight = np.zeros((h, w), dtype=np.float32)
-    weight[dist <= radius] = 1.0
-    fade = (dist > radius) & (dist < radius * 1.9)
-    weight[fade] = 1.0 - (dist[fade] - radius) / (radius * 0.9)
-    weight = cv2.GaussianBlur(weight, (15, 15), 4)
-
-    # Inverse map: output pixel (x,y) ← source pixel (x-dx, y-dy)
-    src_x = np.clip(X - dx, 0, w - 1)
-    src_y = np.clip(Y - dy, 0, h - 1)
-
-    shifted = cv2.remap(img_np, src_x, src_y,
-                        cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
-
-    w3 = weight[:, :, None]
-    return (shifted * w3 + img_np * (1.0 - w3)).astype(np.uint8)
+from src.gradio_pipeline import GradioPipeline  # noqa: E402
+from src.config.argument_config import ArgumentConfig  # noqa: E402
+from src.config.inference_config import InferenceConfig  # noqa: E402
+from src.config.crop_config import CropConfig  # noqa: E402
 
 
 # ── Inference class ───────────────────────────────────────────────────────────
 
 class GazeSliderInference:
     """
-    Redirect eye gaze using MediaPipe iris warping.
+    Redirect eye gaze in a portrait using LivePortrait's 3D keypoint system.
 
-    Parameters accepted by __init__ match the old LoRA-based signature so the
-    Gradio app works without changes; lora_h / lora_v / rank / alpha are
-    silently ignored.
+    Constructor signature intentionally matches the old LoRA-based version so
+    that app_eye_gaze.py works without changes.  model_id / lora_h / lora_v /
+    rank / alpha / train_method are silently ignored.
     """
+
+    # LivePortrait eyeball_direction values that feel "full-range"
+    # (can be tuned; ±20 is the default Gradio slider range)
+    DEFAULT_MAX_SCALE: float = 20.0
 
     def __init__(
         self,
@@ -100,159 +85,149 @@ class GazeSliderInference:
         alpha: float = 4.0,   # ignored
         train_method: str = "noxattn",  # ignored
         device: str = "cuda",
-        dtype: torch.dtype = torch.bfloat16,
+        dtype=None,           # ignored
     ):
-        if not HAS_MEDIAPIPE:
-            raise RuntimeError(
-                "mediapipe is required for iris detection.\n"
-                "Install it with:  pip install mediapipe"
-            )
+        use_half = (device != "cpu")
+        inference_cfg = InferenceConfig(flag_use_half_precision=use_half)
+        crop_cfg      = CropConfig()
+        args          = ArgumentConfig()
 
-        self.device = torch.device(device)
-        self.dtype  = dtype
+        # Run LivePortrait from its own root so internal relative paths resolve
+        os.chdir(_LP_ROOT)
+        print(f"[GazeWarp] Loading LivePortrait from {_LP_ROOT} …")
+        self.pipeline = GradioPipeline(inference_cfg, crop_cfg, args)
+        os.chdir(_ORIG_CWD)
+        print("[GazeWarp] LivePortrait ready.")
 
-        print(f"[GazeWarp] Loading Flux2KleinPipeline from {model_id} …")
-        self.pipe = Flux2KleinPipeline.from_pretrained(
-            model_id, torch_dtype=dtype
-        ).to(self.device)
-        print("[GazeWarp] Pipeline ready.")
+        # Cached per-image state (avoids re-running face detection on repeats)
+        self._cached_img_path: Optional[str] = None
+        self._source_eye_ratio: float = 0.0
+        self._source_lip_ratio: float = 0.0
+        self._tmp_path: Optional[str] = None  # reusable temp file
 
-        # MediaPipe face mesh (refine_landmarks=True gives iris landmarks 468–477)
-        self._face_mesh = mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=True,
-            refine_landmarks=True,
-            max_num_faces=1,
-            min_detection_confidence=0.5,
+    # ── internal helpers ──────────────────────────────────────────────────────
+
+    def _img_to_tmp(self, image: Image.Image) -> str:
+        """Save PIL image to a stable temp file, return path."""
+        if self._tmp_path is None:
+            fd, self._tmp_path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
+        image.save(self._tmp_path)
+        return self._tmp_path
+
+    def _init_source(self, img_path: str, scale: float = 2.3):
+        """Run face detection + ratio extraction (once per new image)."""
+        # Use a stable hash to avoid re-running for the same pixel content
+        import hashlib
+        with open(img_path, "rb") as f:
+            h = hashlib.md5(f.read()).hexdigest()
+        if getattr(self, "_cached_hash", None) == h:
+            return self._source_eye_ratio, self._source_lip_ratio
+
+        os.chdir(_LP_ROOT)
+        eye_r, lip_r = self.pipeline.init_retargeting_image(
+            retargeting_source_scale=scale,
+            source_eye_ratio=0.0,
+            source_lip_ratio=0.0,
+            input_image=img_path,
         )
-        print("[GazeWarp] MediaPipe FaceMesh ready.")
-
-    # ── helpers ───────────────────────────────────────────────────────────────
-
-    def _detect(self, img_np: np.ndarray):
-        """Return MediaPipe face landmarks or None."""
-        res = self._face_mesh.process(img_np)
-        if not res.multi_face_landmarks:
-            return None
-        return res.multi_face_landmarks[0].landmark
-
-    def _iris_params(self, lm, indices, h, w):
-        """Return (cx, cy, radius) of an iris in pixel coords."""
-        pts = [(lm[i].x * w, lm[i].y * h) for i in indices]
-        cx  = sum(p[0] for p in pts) / len(pts)
-        cy  = sum(p[1] for p in pts) / len(pts)
-        r   = max(
-            max(abs(p[0] - cx) for p in pts),
-            max(abs(p[1] - cy) for p in pts)
-        ) * 1.5        # expand slightly to cover full iris
-        return cx, cy, max(r, 4.0)
+        os.chdir(_ORIG_CWD)
+        self._source_eye_ratio = eye_r
+        self._source_lip_ratio = lip_r
+        self._cached_hash = h
+        print(f"[GazeWarp] Source ratios — eye={eye_r:.3f}  lip={lip_r:.3f}")
+        return eye_r, lip_r
 
     # ── public API ────────────────────────────────────────────────────────────
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def apply_gaze(
         self,
         image: Image.Image,
         gaze_x: float = 0.0,   # +1 = look left,  −1 = look right
         gaze_y: float = 0.0,   # +1 = look up,    −1 = look down
-        eye_open: float = 0.0,    # placeholder (no LoRA yet)
-        brow_raise: float = 0.0,  # placeholder
-        prompt: str = "professional portrait photograph, studio lighting, "
-                      "photorealistic, sharp focus, high quality",
-        strength: float = 0.20,   # 0 = warp only, >0 = Flux refinement
-        num_inference_steps: int = 8,
-        guidance_scale: float = 0.0,
-        max_scale: float = 5.0,   # pixel shift = |gaze| × max_scale × 3
+        eye_open: float = 0.0,    # placeholder — not yet implemented
+        brow_raise: float = 0.0,  # maps to LivePortrait 'eyebrow'
+        strength: float = 0.0,    # reserved for future Flux refinement pass
+        max_scale: float = None,  # pixel shift scale (default: 20.0)
+        retargeting_source_scale: float = 2.3,
         seed: Optional[int] = None,
+        **kwargs,
     ) -> Image.Image:
         """
-        Redirect gaze by warping the iris regions.
+        Return a new PIL image with the eye gaze redirected.
 
-        gaze_x=+1 shifts both irises LEFT  (person looks left).
-        gaze_x=-1 shifts both irises RIGHT (person looks right).
-        gaze_y=+1 shifts both irises UP.
-        gaze_y=-1 shifts both irises DOWN.
-
-        strength>0 runs a low-noise Flux pass to smooth warp seams.
+        gaze_x = +1  →  look left
+        gaze_x = -1  →  look right
+        gaze_y = +1  →  look up
+        gaze_y = -1  →  look down
         """
-        gaze_x   = max(-1.0, min(1.0, float(gaze_x)))
-        gaze_y   = max(-1.0, min(1.0, float(gaze_y)))
-        strength = max(0.0, min(1.0, float(strength)))
+        gaze_x = max(-1.0, min(1.0, float(gaze_x)))
+        gaze_y = max(-1.0, min(1.0, float(gaze_y)))
 
-        orig_size = image.size
-        img1024   = image.convert("RGB").resize((1024, 1024), Image.LANCZOS)
-        img_np    = np.array(img1024)  # H×W×3 uint8
+        if max_scale is None:
+            max_scale = self.DEFAULT_MAX_SCALE
 
-        # pixel displacement per joystick unit
-        pixel_shift = max_scale * 3.0   # e.g. scale=5 → 15 px at gaze=1
-        # +gaze_x (look left)  → iris moves left  → dx negative
-        # +gaze_y (look up)    → iris moves up     → dy negative
-        dx = -gaze_x * pixel_shift
-        dy = -gaze_y * pixel_shift
+        # Map joystick coords → LivePortrait eyeball_direction
+        # gaze_x: +1=left → eyeball_direction_x = +max_scale (iris shifts left in frame)
+        # gaze_y: +1=up   → eyeball_direction_y = -max_scale (sign flip: LP y=+ is down)
+        eye_dir_x = float(gaze_x) * max_scale
+        eye_dir_y = float(-gaze_y) * max_scale  # sign flip for y
 
         print(f"[GazeWarp] gaze=({gaze_x:+.2f},{gaze_y:+.2f})  "
-              f"shift=({dx:+.1f},{dy:+.1f})px  refine_strength={strength:.2f}")
+              f"LP_dir=({eye_dir_x:+.1f},{eye_dir_y:+.1f})")
 
-        # ── 1. detect irises ─────────────────────────────────────────────────
-        lm = self._detect(img_np)
-        if lm is None:
-            print("[GazeWarp] ⚠ No face detected — returning original image")
+        if abs(eye_dir_x) < 0.05 and abs(eye_dir_y) < 0.05:
+            print("[GazeWarp] Gaze near-zero, returning original.")
             return image
 
-        h, w = img_np.shape[:2]
-        l_cx, l_cy, l_r = self._iris_params(lm, LEFT_IRIS,  h, w)
-        r_cx, r_cy, r_r = self._iris_params(lm, RIGHT_IRIS, h, w)
-        print(f"[GazeWarp] L iris=({l_cx:.0f},{l_cy:.0f}) r={l_r:.0f}px  "
-              f"R iris=({r_cx:.0f},{r_cy:.0f}) r={r_r:.0f}px")
+        # Write input to temp file (LivePortrait needs a file path)
+        img_path = self._img_to_tmp(image.convert("RGB"))
 
-        if abs(dx) < 0.5 and abs(dy) < 0.5:
-            print("[GazeWarp] Gaze near-zero, skipping warp.")
-            return image
+        # Init source (face detection + ratio extraction)
+        eye_r, lip_r = self._init_source(img_path, scale=retargeting_source_scale)
 
-        # ── 2. warp both irises ──────────────────────────────────────────────
-        warped = _shift_iris(img_np,  l_cx, l_cy, l_r, dx, dy)
-        warped = _shift_iris(warped,  r_cx, r_cy, r_r, dx, dy)
-        warped_pil = Image.fromarray(warped)
+        # Run LivePortrait retargeting
+        os.chdir(_LP_ROOT)
+        try:
+            _out_crop, out_blended = self.pipeline.execute_image_retargeting(
+                input_eye_ratio=eye_r,
+                input_lip_ratio=lip_r,
+                input_head_pitch_variation=0,
+                input_head_yaw_variation=0,
+                input_head_roll_variation=0,
+                mov_x=0.0,
+                mov_y=0.0,
+                mov_z=1.0,
+                lip_variation_zero=0,
+                lip_variation_one=0,
+                lip_variation_two=0,
+                lip_variation_three=0,
+                smile=0,
+                wink=0,
+                eyebrow=float(brow_raise),
+                eyeball_direction_x=eye_dir_x,
+                eyeball_direction_y=eye_dir_y,
+                input_image=img_path,
+                retargeting_source_scale=retargeting_source_scale,
+                flag_stitching_retargeting_input=True,
+                flag_do_crop_input_retargeting_image=True,
+            )
+        finally:
+            os.chdir(_ORIG_CWD)
 
-        # ── 3. optional Flux refinement ──────────────────────────────────────
-        # Pass the warped image through Flux at low strength to smooth seams
-        # while preserving the corrected iris position.
-        if strength > 0.05:
-            generator = None
-            if seed is not None:
-                generator = torch.Generator(device=self.device).manual_seed(seed)
-
-            # Build a partial sigma schedule
-            img_t = self.pipe.image_processor.preprocess(warped_pil)
-            img_t = img_t.to(self.device, self.dtype)
-            vae_l = self.pipe.vae.encode(img_t).latent_dist.sample()
-            sf    = getattr(self.pipe.vae.config, "scaling_factor",
-                    getattr(self.pipe.vae.config, "scale_factor", 0.13025))
-            vae_l = vae_l * sf
-            spatial = F.pixel_unshuffle(vae_l, downscale_factor=2)  # [1,128,64,64]
-
-            t      = float(strength)
-            noise  = torch.randn(spatial.shape, device=self.device, dtype=self.dtype)
-            if generator is not None:
-                noise = torch.randn(spatial.shape, generator=generator,
-                                    device=self.device, dtype=self.dtype)
-            noisy  = (1.0 - t) * spatial + t * noise
-
-            n_steps = max(2, int(num_inference_steps * t))
-            sigmas  = torch.linspace(t, 0.001, n_steps + 1).tolist()
-
-            refined = self.pipe(
-                image=warped_pil,
-                prompt=prompt,
-                num_inference_steps=n_steps,
-                sigmas=sigmas,
-                latents=noisy,
-                guidance_scale=guidance_scale,
-                generator=generator,
-                output_type="pil",
-            ).images[0]
-            warped_pil = refined
-
-        return warped_pil.resize(orig_size, Image.LANCZOS)
+        # Convert output to PIL (paste_back returns numpy uint8 HWC RGB)
+        if isinstance(out_blended, np.ndarray):
+            return Image.fromarray(out_blended)
+        return out_blended  # already PIL in some LP versions
 
     def apply_gaze_batch(self, image, gaze_coords, **kwargs):
         return [self.apply_gaze(image, gx, gy, **kwargs) for gx, gy in gaze_coords]
+
+    def __del__(self):
+        # Clean up temp file
+        if self._tmp_path and os.path.exists(self._tmp_path):
+            try:
+                os.unlink(self._tmp_path)
+            except Exception:
+                pass

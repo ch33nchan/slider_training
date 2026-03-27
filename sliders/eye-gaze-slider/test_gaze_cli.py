@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-test_gaze_cli.py — MediaPipe iris warp batch test.
+test_gaze_cli.py — LivePortrait gaze batch test.
 
 Produces two strips saved to disk:
 
-  batch_extreme.png   — input | LEFT | RIGHT | UP | DOWN  (gaze=1.0, scale=10)
-  batch_moderate.png  — input | left | right | center | down  (gaze=0.4, scale=5)
+  batch_extreme.png   — input | LEFT | RIGHT | UP | DOWN  (gaze=1.0, scale=20)
+  batch_moderate.png  — input | left | right | center | down  (gaze=0.4, scale=20)
 
 Usage:
   python test_gaze_cli.py --input portrait.jpg
@@ -23,7 +23,7 @@ from inference_eye_gaze import GazeSliderInference
 
 
 def label_image(img: Image.Image, text: str, font_size: int = 28) -> Image.Image:
-    """Paste a white label bar under the image."""
+    """Paste a label bar under the image."""
     bar_h = font_size + 10
     out   = Image.new("RGB", (img.width, img.height + bar_h), (30, 30, 30))
     out.paste(img, (0, 0))
@@ -49,66 +49,69 @@ def make_strip(images, labels) -> Image.Image:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--model",  default="black-forest-labs/FLUX.2-klein-9B")
     p.add_argument("--input",  default="gaze_test_input.png")
     p.add_argument("--device", default="cuda")
+    p.add_argument("--scale",  type=float, default=20.0,
+                   help="LivePortrait eyeball_direction max value (default 20)")
     p.add_argument("--outdir", default="/tmp")
     args = p.parse_args()
 
-    # ── load engine (no LoRA needed) ──────────────────────────────────────
-    print("Loading engine …")
-    engine = GazeSliderInference(model_id=args.model, device=args.device)
+    # ── load engine ──────────────────────────────────────────────────────────
+    print("Loading LivePortrait engine …")
+    engine = GazeSliderInference(device=args.device)
 
-    # ── load input image ──────────────────────────────────────────────────
+    # ── load input image ─────────────────────────────────────────────────────
     inp_path = Path(args.input)
     if not inp_path.exists():
         raise SystemExit(f"Input image not found: {inp_path}\n"
-                         "Run  python test_gaze_cli.py  once without --input to generate one.")
+                         "Pass --input /path/to/portrait.jpg")
     img = Image.open(inp_path).convert("RGB")
     print(f"Input: {inp_path}  {img.size}")
 
-    # ── batch 1 — EXTREME (gaze=1.0, scale=10) ───────────────────────────
-    print("\n=== Batch 1: EXTREME ===")
+    out_size = (512, 512)
+
+    # ── batch 1 — EXTREME (gaze=1.0) ─────────────────────────────────────────
+    print("\n=== Batch 1: EXTREME (gaze=±1.0) ===")
     extreme_cases = [
-        ("INPUT",  0.0,  0.0, 10.0),
-        ("LEFT",  +1.0,  0.0, 10.0),
-        ("RIGHT", -1.0,  0.0, 10.0),
-        ("UP",     0.0, +1.0, 10.0),
-        ("DOWN",   0.0, -1.0, 10.0),
+        ("INPUT",  0.0,  0.0),
+        ("LEFT",  +1.0,  0.0),
+        ("RIGHT", -1.0,  0.0),
+        ("UP",     0.0, +1.0),
+        ("DOWN",   0.0, -1.0),
     ]
     extreme_imgs = []
-    for label, gx, gy, scale in extreme_cases:
-        print(f"  → {label:6s}  gaze=({gx:+.1f},{gy:+.1f})  scale={scale}")
+    for label, gx, gy in extreme_cases:
+        print(f"  → {label:6s}  gaze=({gx:+.1f},{gy:+.1f})")
         if label == "INPUT":
-            extreme_imgs.append(img.resize((512, 512), Image.LANCZOS))
+            extreme_imgs.append(img.resize(out_size, Image.LANCZOS))
         else:
             out = engine.apply_gaze(img, gaze_x=gx, gaze_y=gy,
-                                    max_scale=scale, strength=0.0)
-            extreme_imgs.append(out.resize((512, 512), Image.LANCZOS))
+                                    max_scale=args.scale)
+            extreme_imgs.append(out.resize(out_size, Image.LANCZOS))
 
     strip1 = make_strip(extreme_imgs, [c[0] for c in extreme_cases])
     out1   = Path(args.outdir) / "batch_extreme.png"
     strip1.save(str(out1))
     print(f"\n✓ Saved → {out1}")
 
-    # ── batch 2 — MODERATE (gaze=0.4, scale=5) ───────────────────────────
-    print("\n=== Batch 2: MODERATE ===")
+    # ── batch 2 — MODERATE (gaze=0.4) ────────────────────────────────────────
+    print("\n=== Batch 2: MODERATE (gaze=±0.4) ===")
     moderate_cases = [
-        ("INPUT",   0.0,   0.0,  5.0),
-        ("left",   +0.4,   0.0,  5.0),
-        ("right",  -0.4,   0.0,  5.0),
-        ("center",  0.0,   0.0,  5.0),
-        ("down",    0.0,  -0.4,  5.0),
+        ("INPUT",   0.0,   0.0),
+        ("left",   +0.4,   0.0),
+        ("right",  -0.4,   0.0),
+        ("center",  0.0,   0.0),
+        ("down",    0.0,  -0.4),
     ]
     moderate_imgs = []
-    for label, gx, gy, scale in moderate_cases:
-        print(f"  → {label:7s}  gaze=({gx:+.2f},{gy:+.2f})  scale={scale}")
+    for label, gx, gy in moderate_cases:
+        print(f"  → {label:7s}  gaze=({gx:+.2f},{gy:+.2f})")
         if label in ("INPUT", "center"):
-            moderate_imgs.append(img.resize((512, 512), Image.LANCZOS))
+            moderate_imgs.append(img.resize(out_size, Image.LANCZOS))
         else:
             out = engine.apply_gaze(img, gaze_x=gx, gaze_y=gy,
-                                    max_scale=scale, strength=0.0)
-            moderate_imgs.append(out.resize((512, 512), Image.LANCZOS))
+                                    max_scale=args.scale)
+            moderate_imgs.append(out.resize(out_size, Image.LANCZOS))
 
     strip2 = make_strip(moderate_imgs, [c[0] for c in moderate_cases])
     out2   = Path(args.outdir) / "batch_moderate.png"
