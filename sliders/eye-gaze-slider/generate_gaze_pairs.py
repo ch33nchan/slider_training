@@ -67,7 +67,7 @@ def worker(gpu_id: int, image_paths: list[Path]):
     args         = ArgumentConfig()
     infer_cfg    = InferenceConfig()
     crop_cfg     = CropConfig()
-    pipeline     = GradioPipeline(args, infer_cfg, crop_cfg)
+    pipeline     = GradioPipeline(infer_cfg, crop_cfg, args)
 
     # Directions: (axis, direction_name, gaze_x, gaze_y, split, role)
     DIRECTIONS = [
