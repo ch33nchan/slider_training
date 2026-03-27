@@ -1,309 +1,258 @@
 """
 inference_eye_gaze.py
 ---------------------
-GazeSliderInference — loads two trained LoRA sliders (horizontal + vertical)
-on top of FLUX.2-klein-9B and applies them via img2img to redirect eye gaze
-in an input portrait, while preserving skin texture and identity.
+GazeSliderInference — MediaPipe iris detection + geometric warp to redirect
+eye gaze in a portrait, with an optional Flux2Klein refinement pass to
+clean up warp seams.
 
-Two LoRAs applied simultaneously (both monkey-patched onto the same
-transformer; they chain additively via org_forward):
-  - network_h  :  left (scale > 0) ↔ right (scale < 0)
-  - network_v  :  up   (scale > 0) ↔ down  (scale < 0)
+No LoRA required.  Works deterministically.
 
-Usage (standalone):
+Usage:
     from inference_eye_gaze import GazeSliderInference
-    from PIL import Image
-
-    engine = GazeSliderInference(
-        model_id="black-forest-labs/FLUX.2-klein-9B",
-        lora_h="models/eye_gaze_horizontal_rank4_alpha1.0/last.safetensors",
-        lora_v="models/eye_gaze_vertical_rank4_alpha1.0/last.safetensors",
-    )
-
-    img_out = engine.apply_gaze(
-        image=Image.open("portrait.jpg"),
-        gaze_x=0.6,    # -1 (right) … +1 (left)
-        gaze_y=0.0,    # -1 (down)  … +1 (up)
-        strength=0.45, # how much the image is re-generated (0 = no change)
-        prompt="professional portrait photograph, studio lighting, photorealistic",
-        max_scale=5.0, # maps joystick ±1 to LoRA scale ±max_scale
-    )
-    img_out.save("output.jpg")
+    engine = GazeSliderInference("black-forest-labs/FLUX.2-klein-9B")
+    out = engine.apply_gaze(image, gaze_x=0.8, gaze_y=0.0, max_scale=5.0)
 """
 
 import sys
 from pathlib import Path
 from typing import Optional, Union
 
+import cv2
+import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from safetensors.torch import load_file
 
-# ---------------------------------------------------------------------------
-# Path setup — reuse existing lora.py
-# ---------------------------------------------------------------------------
-REPO_ROOT = Path(__file__).resolve().parent.parent
-FLUX_UTILS = REPO_ROOT / "flux-sliders" / "utils"
-sys.path.insert(0, str(FLUX_UTILS.parent))
+try:
+    import mediapipe as mp
+    HAS_MEDIAPIPE = True
+except ImportError:
+    HAS_MEDIAPIPE = False
 
-from utils.lora import LoRANetwork  # noqa
+try:
+    from diffusers import Flux2KleinPipeline
+except ImportError:
+    from diffusers import FluxPipeline as Flux2KleinPipeline   # fallback
 
-# ---------------------------------------------------------------------------
-# Diffusers imports — FluxImg2ImgPipeline requires diffusers >= 0.30
-# ---------------------------------------------------------------------------
-from diffusers import Flux2KleinPipeline
+# ── MediaPipe FaceMesh landmark indices ──────────────────────────────────────
+# These are only available when refine_landmarks=True
+LEFT_IRIS  = [468, 469, 470, 471, 472]
+RIGHT_IRIS = [473, 474, 475, 476, 477]
 
+# Eye outline — used to clamp the warp to the eye socket
+LEFT_EYE_OUTLINE  = [362, 382, 381, 380, 374, 373, 390, 249,
+                     263, 466, 388, 387, 386, 385, 384, 398]
+RIGHT_EYE_OUTLINE = [33,  7,  163, 144, 145, 153, 154, 155,
+                     133, 173, 157, 158, 159, 160, 161, 246]
+
+
+# ── Core warp primitive ───────────────────────────────────────────────────────
+
+def _shift_iris(img_np: np.ndarray,
+                cx: float, cy: float, radius: float,
+                dx: float, dy: float) -> np.ndarray:
+    """
+    Shift the iris disc centred at (cx, cy) with the given pixel radius
+    by (dx, dy) pixels, with Gaussian feathering at the border.
+
+    dx > 0 → iris moves right in the output image
+    dy > 0 → iris moves down  in the output image
+    """
+    h, w  = img_np.shape[:2]
+    Y, X  = np.mgrid[0:h, 0:w].astype(np.float32)
+    dist  = np.sqrt((X - cx) ** 2 + (Y - cy) ** 2)
+
+    # Weight: 1.0 inside iris, smooth fall-off to 0 at 1.9 × radius
+    weight = np.zeros((h, w), dtype=np.float32)
+    weight[dist <= radius] = 1.0
+    fade = (dist > radius) & (dist < radius * 1.9)
+    weight[fade] = 1.0 - (dist[fade] - radius) / (radius * 0.9)
+    weight = cv2.GaussianBlur(weight, (15, 15), 4)
+
+    # Inverse map: output pixel (x,y) ← source pixel (x-dx, y-dy)
+    src_x = np.clip(X - dx, 0, w - 1)
+    src_y = np.clip(Y - dy, 0, h - 1)
+
+    shifted = cv2.remap(img_np, src_x, src_y,
+                        cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+
+    w3 = weight[:, :, None]
+    return (shifted * w3 + img_np * (1.0 - w3)).astype(np.uint8)
+
+
+# ── Inference class ───────────────────────────────────────────────────────────
 
 class GazeSliderInference:
     """
-    Loads FLUX.2-klein-9B + two LoRA sliders and exposes a single
-    `apply_gaze(image, gaze_x, gaze_y, ...)` method.
+    Redirect eye gaze using MediaPipe iris warping.
 
-    The two LoRA networks are loaded onto the SAME transformer; they
-    compose additively because each LoRAModule chains through org_forward.
-
-    Parameters
-    ----------
-    model_id : str
-        HuggingFace model ID (e.g. "black-forest-labs/FLUX.2-klein-9B")
-    lora_h : str | Path
-        Path to the horizontal gaze slider weights (.safetensors or .pt)
-    lora_v : str | Path
-        Path to the vertical gaze slider weights (.safetensors or .pt)
-    rank : int
-        LoRA rank used during training (must match saved weights)
-    alpha : float
-        LoRA alpha used during training (must match saved weights)
-    train_method : str
-        Layer filter used during training (must match)
-    device : str
-        "cuda" (H100) or "cpu"
-    dtype : torch.dtype
-        Inference dtype (bfloat16 recommended on H100)
+    Parameters accepted by __init__ match the old LoRA-based signature so the
+    Gradio app works without changes; lora_h / lora_v / rank / alpha are
+    silently ignored.
     """
 
     def __init__(
         self,
         model_id: str = "black-forest-labs/FLUX.2-klein-9B",
-        lora_h: Optional[Union[str, Path]] = None,
-        lora_v: Optional[Union[str, Path]] = None,
-        rank: int = 4,
-        alpha: float = 1.0,
-        train_method: str = "noxattn",
+        lora_h=None,          # ignored — kept for backward compat
+        lora_v=None,          # ignored
+        rank: int = 8,        # ignored
+        alpha: float = 4.0,   # ignored
+        train_method: str = "noxattn",  # ignored
         device: str = "cuda",
         dtype: torch.dtype = torch.bfloat16,
     ):
+        if not HAS_MEDIAPIPE:
+            raise RuntimeError(
+                "mediapipe is required for iris detection.\n"
+                "Install it with:  pip install mediapipe"
+            )
+
         self.device = torch.device(device)
         self.dtype  = dtype
-        self.rank   = rank
-        self.alpha  = alpha
-        self.train_method = train_method
 
-        print(f"[GazeSlider] Loading pipeline from {model_id} …")
-        self._load_pipeline(model_id)
-
-        # --- Attach LoRA sliders to the already-loaded transformer ---
-        # Auto-detect rank from checkpoint so rank=4 vs rank=8 mismatches
-        # are handled transparently.
-        rank_h = self._peek_rank(lora_h) if lora_h else rank
-        rank_v = self._peek_rank(lora_v) if lora_v else rank
-
-        print(f"[GazeSlider] Attaching LoRA networks  rank_h={rank_h}  rank_v={rank_v} …")
-        self.network_h = LoRANetwork(
-            self.pipe.transformer,
-            rank=rank_h, multiplier=0.0, alpha=alpha, train_method=train_method
-        ).to(self.device).to(self.dtype)
-        self.network_v = LoRANetwork(
-            self.pipe.transformer,
-            rank=rank_v, multiplier=0.0, alpha=alpha, train_method=train_method
-        ).to(self.device).to(self.dtype)
-
-        if lora_h:
-            self._load_lora(self.network_h, lora_h, label="horizontal")
-        else:
-            print("[GazeSlider] ⚠ No horizontal LoRA path provided — H network randomly initialized")
-
-        if lora_v:
-            self._load_lora(self.network_v, lora_v, label="vertical")
-        else:
-            print("[GazeSlider] ⚠ No vertical LoRA path provided — V network randomly initialized")
-
-        print("[GazeSlider] Ready.")
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _peek_rank(path: Union[str, Path]) -> int:
-        """Read the first lora_down weight from a checkpoint and return its rank."""
-        path = Path(path)
-        if path.suffix == ".safetensors":
-            from safetensors import safe_open
-            with safe_open(str(path), framework="pt", device="cpu") as f:
-                for key in f.keys():
-                    if "lora_down" in key:
-                        return f.get_tensor(key).shape[0]
-        else:
-            state = torch.load(str(path), map_location="cpu", weights_only=True)
-            for key, val in state.items():
-                if "lora_down" in key:
-                    return val.shape[0]
-        return 4  # fallback
-
-    def _load_pipeline(self, model_id: str) -> None:
-        """Load Flux2KleinPipeline — supports image+prompt img2img natively."""
+        print(f"[GazeWarp] Loading Flux2KleinPipeline from {model_id} …")
         self.pipe = Flux2KleinPipeline.from_pretrained(
-            model_id,
-            torch_dtype=self.dtype,
+            model_id, torch_dtype=dtype
         ).to(self.device)
-        self._img2img_mode = True
-        print("[GazeSlider] Using Flux2KleinPipeline")
+        print("[GazeWarp] Pipeline ready.")
 
-        pass  # VAE tiling left at default
+        # MediaPipe face mesh (refine_landmarks=True gives iris landmarks 468–477)
+        self._face_mesh = mp.solutions.face_mesh.FaceMesh(
+            static_image_mode=True,
+            refine_landmarks=True,
+            max_num_faces=1,
+            min_detection_confidence=0.5,
+        )
+        print("[GazeWarp] MediaPipe FaceMesh ready.")
 
-    def _load_lora(self, network: LoRANetwork, path: Union[str, Path], label: str) -> None:
-        """Load safetensors / pt weights into a LoRANetwork."""
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"LoRA weights not found: {path}")
+    # ── helpers ───────────────────────────────────────────────────────────────
 
-        if path.suffix == ".safetensors":
-            state = load_file(str(path), device=str(self.device))
-        else:
-            state = torch.load(str(path), map_location=self.device)
+    def _detect(self, img_np: np.ndarray):
+        """Return MediaPipe face landmarks or None."""
+        res = self._face_mesh.process(img_np)
+        if not res.multi_face_landmarks:
+            return None
+        return res.multi_face_landmarks[0].landmark
 
-        missing, unexpected = network.load_state_dict(state, strict=False)
-        if missing:
-            print(f"[GazeSlider] ⚠ {label} LoRA — {len(missing)} missing keys")
-        if unexpected:
-            print(f"[GazeSlider] ⚠ {label} LoRA — {len(unexpected)} unexpected keys")
-        print(f"[GazeSlider] ✓ Loaded {label} LoRA from {path.name}")
+    def _iris_params(self, lm, indices, h, w):
+        """Return (cx, cy, radius) of an iris in pixel coords."""
+        pts = [(lm[i].x * w, lm[i].y * h) for i in indices]
+        cx  = sum(p[0] for p in pts) / len(pts)
+        cy  = sum(p[1] for p in pts) / len(pts)
+        r   = max(
+            max(abs(p[0] - cx) for p in pts),
+            max(abs(p[1] - cy) for p in pts)
+        ) * 1.5        # expand slightly to cover full iris
+        return cx, cy, max(r, 4.0)
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # ── public API ────────────────────────────────────────────────────────────
 
     @torch.inference_mode()
     def apply_gaze(
         self,
         image: Image.Image,
-        gaze_x: float = 0.0,
-        gaze_y: float = 0.0,
-        eye_open: float = 0.0,    # -1 close → +1 open  (placeholder, no LoRA yet)
-        brow_raise: float = 0.0,  # -1 lower  → +1 raise (placeholder, no LoRA yet)
+        gaze_x: float = 0.0,   # +1 = look left,  −1 = look right
+        gaze_y: float = 0.0,   # +1 = look up,    −1 = look down
+        eye_open: float = 0.0,    # placeholder (no LoRA yet)
+        brow_raise: float = 0.0,  # placeholder
         prompt: str = "professional portrait photograph, studio lighting, "
                       "photorealistic, sharp focus, high quality",
-        strength: float = 0.45,
+        strength: float = 0.20,   # 0 = warp only, >0 = Flux refinement
         num_inference_steps: int = 8,
         guidance_scale: float = 0.0,
-        max_scale: float = 5.0,
+        max_scale: float = 5.0,   # pixel shift = |gaze| × max_scale × 3
         seed: Optional[int] = None,
     ) -> Image.Image:
         """
-        Redirect the eye gaze of a portrait image.
+        Redirect gaze by warping the iris regions.
 
-        Parameters
-        ----------
-        image : PIL.Image.Image
-            Input portrait (any size; will be resized to 1024×1024 internally)
-        gaze_x : float
-            Horizontal gaze offset, in [-1, +1].
-            -1 = hard right,  0 = centre,  +1 = hard left
-        gaze_y : float
-            Vertical gaze offset, in [-1, +1].
-            -1 = hard down,   0 = centre,  +1 = hard up
-        prompt : str
-            Describes the portrait style (NOT the gaze — that's handled by LoRA)
-        strength : float
-            Img2img strength.  0 = no change, 1 = full generation.
-            Keep around 0.35–0.55 for natural-looking gaze edits.
-        num_inference_steps : int
-            Total FLUX denoising steps (before strength reduction).
-        guidance_scale : float
-            CFG scale. Use 0.0 for distilled models (FLUX.2-klein / schnell).
-        max_scale : float
-            LoRA scale that corresponds to joystick ±1.
-            Higher = stronger effect; start at 5.0, increase if too subtle.
-        seed : int | None
-            Optional seed for reproducibility.
+        gaze_x=+1 shifts both irises LEFT  (person looks left).
+        gaze_x=-1 shifts both irises RIGHT (person looks right).
+        gaze_y=+1 shifts both irises UP.
+        gaze_y=-1 shifts both irises DOWN.
 
-        Returns
-        -------
-        PIL.Image.Image — edited portrait
+        strength>0 runs a low-noise Flux pass to smooth warp seams.
         """
-        # --- Input validation ---
         gaze_x   = max(-1.0, min(1.0, float(gaze_x)))
         gaze_y   = max(-1.0, min(1.0, float(gaze_y)))
-        strength = max(0.05, min(1.0, float(strength)))
+        strength = max(0.0, min(1.0, float(strength)))
 
-        scale_h = gaze_x * max_scale   # +x joystick → left gaze
-        scale_v = gaze_y * max_scale   # +y joystick → up   gaze
+        orig_size = image.size
+        img1024   = image.convert("RGB").resize((1024, 1024), Image.LANCZOS)
+        img_np    = np.array(img1024)  # H×W×3 uint8
 
-        print(f"[GazeSlider] scale_h={scale_h:+.3f}  scale_v={scale_v:+.3f}  "
-              f"strength={strength:.2f}  steps={num_inference_steps}")
+        # pixel displacement per joystick unit
+        pixel_shift = max_scale * 3.0   # e.g. scale=5 → 15 px at gaze=1
+        # +gaze_x (look left)  → iris moves left  → dx negative
+        # +gaze_y (look up)    → iris moves up     → dy negative
+        dx = -gaze_x * pixel_shift
+        dy = -gaze_y * pixel_shift
 
-        generator = None
-        if seed is not None:
-            generator = torch.Generator(device=self.device).manual_seed(seed)
+        print(f"[GazeWarp] gaze=({gaze_x:+.2f},{gaze_y:+.2f})  "
+              f"shift=({dx:+.1f},{dy:+.1f})px  refine_strength={strength:.2f}")
 
-        orig_size     = image.size
-        image_resized = image.convert("RGB").resize((1024, 1024), Image.LANCZOS)
+        # ── 1. detect irises ─────────────────────────────────────────────────
+        lm = self._detect(img_np)
+        if lm is None:
+            print("[GazeWarp] ⚠ No face detected — returning original image")
+            return image
 
-        # ------------------------------------------------------------------
-        # Diagnostic mode: skip custom latents/sigmas entirely and let the
-        # pipeline run its default schedule.  This confirms whether the LoRA
-        # itself produces a visible gaze change before we re-introduce img2img.
-        # The `image` param still provides identity conditioning.
-        # ------------------------------------------------------------------
-        print(f"[GazeSlider] scale_h={scale_h:+.3f}  scale_v={scale_v:+.3f}  "
-              f"strength={strength:.2f}  steps={num_inference_steps}")
+        h, w = img_np.shape[:2]
+        l_cx, l_cy, l_r = self._iris_params(lm, LEFT_IRIS,  h, w)
+        r_cx, r_cy, r_r = self._iris_params(lm, RIGHT_IRIS, h, w)
+        print(f"[GazeWarp] L iris=({l_cx:.0f},{l_cy:.0f}) r={l_r:.0f}px  "
+              f"R iris=({r_cx:.0f},{r_cy:.0f}) r={r_r:.0f}px")
 
-        self.network_h.set_lora_slider(scale=scale_h)
-        self.network_v.set_lora_slider(scale=scale_v)
+        if abs(dx) < 0.5 and abs(dy) < 0.5:
+            print("[GazeWarp] Gaze near-zero, skipping warp.")
+            return image
 
-        # ── Sanity-check: confirm LoRA modifies transformer output ──────────
-        _blk  = self.pipe.transformer.transformer_blocks[0].attn.to_q
-        _x    = torch.randn(1, _blk.weight.shape[1], device=self.device, dtype=self.dtype)
-        _base = _blk(_x).abs().sum().item()
-        with self.network_h:
-            _lora = _blk(_x).abs().sum().item()
-        print(f"[LoRA-check] base={_base:.4f}  with_lora={_lora:.4f}  "
-              f"diff={abs(_lora-_base):.6f}  (0=LoRA not applied)")
-        # ────────────────────────────────────────────────────────────────────
+        # ── 2. warp both irises ──────────────────────────────────────────────
+        warped = _shift_iris(img_np,  l_cx, l_cy, l_r, dx, dy)
+        warped = _shift_iris(warped,  r_cx, r_cy, r_r, dx, dy)
+        warped_pil = Image.fromarray(warped)
 
-        with self.network_h, self.network_v:
-            result = self.pipe(
-                image=image_resized,
+        # ── 3. optional Flux refinement ──────────────────────────────────────
+        # Pass the warped image through Flux at low strength to smooth seams
+        # while preserving the corrected iris position.
+        if strength > 0.05:
+            generator = None
+            if seed is not None:
+                generator = torch.Generator(device=self.device).manual_seed(seed)
+
+            # Build a partial sigma schedule
+            img_t = self.pipe.image_processor.preprocess(warped_pil)
+            img_t = img_t.to(self.device, self.dtype)
+            vae_l = self.pipe.vae.encode(img_t).latent_dist.sample()
+            sf    = getattr(self.pipe.vae.config, "scaling_factor",
+                    getattr(self.pipe.vae.config, "scale_factor", 0.13025))
+            vae_l = vae_l * sf
+            spatial = F.pixel_unshuffle(vae_l, downscale_factor=2)  # [1,128,64,64]
+
+            t      = float(strength)
+            noise  = torch.randn(spatial.shape, device=self.device, dtype=self.dtype)
+            if generator is not None:
+                noise = torch.randn(spatial.shape, generator=generator,
+                                    device=self.device, dtype=self.dtype)
+            noisy  = (1.0 - t) * spatial + t * noise
+
+            n_steps = max(2, int(num_inference_steps * t))
+            sigmas  = torch.linspace(t, 0.001, n_steps + 1).tolist()
+
+            refined = self.pipe(
+                image=warped_pil,
                 prompt=prompt,
-                num_inference_steps=num_inference_steps,
+                num_inference_steps=n_steps,
+                sigmas=sigmas,
+                latents=noisy,
                 guidance_scale=guidance_scale,
                 generator=generator,
                 output_type="pil",
             ).images[0]
+            warped_pil = refined
 
-        return result.resize(orig_size, Image.LANCZOS)
+        return warped_pil.resize(orig_size, Image.LANCZOS)
 
-    def apply_gaze_batch(
-        self,
-        image: Image.Image,
-        gaze_coords: list,
-        **kwargs,
-    ) -> list:
-        """
-        Convenience wrapper to generate multiple gaze directions in one call.
-
-        Parameters
-        ----------
-        gaze_coords : list of (gaze_x, gaze_y) tuples
-            e.g. [(-0.8, 0), (0, 0), (0.8, 0)]
-
-        Returns
-        -------
-        list of PIL.Image.Image
-        """
-        return [
-            self.apply_gaze(image, gaze_x=x, gaze_y=y, **kwargs)
-            for x, y in gaze_coords
-        ]
+    def apply_gaze_batch(self, image, gaze_coords, **kwargs):
+        return [self.apply_gaze(image, gx, gy, **kwargs) for gx, gy in gaze_coords]

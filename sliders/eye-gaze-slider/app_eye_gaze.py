@@ -288,14 +288,14 @@ def build_app(model_id, lora_h, lora_v, rank, alpha):
                         gr.Markdown("---")
 
                         strength_sl = gr.Slider(
-                            label="Denoising Strength",
-                            minimum=0.15, maximum=0.85, step=0.05, value=0.45,
-                            info="Lower = preserves more of original image",
+                            label="Refine Strength",
+                            minimum=0.0, maximum=0.4, step=0.05, value=0.0,
+                            info="0 = pure warp · >0 adds a Flux smoothing pass",
                         )
                         intensity_sl = gr.Slider(
-                            label="LoRA Intensity",
+                            label="Warp Intensity",
                             minimum=1.0, maximum=10.0, step=0.5, value=5.0,
-                            info="Maps joystick ±1 → LoRA scale ±intensity",
+                            info="Iris shift = intensity × 3 × |gaze|  pixels",
                         )
                         steps_sl = gr.Slider(
                             label="Inference Steps",
