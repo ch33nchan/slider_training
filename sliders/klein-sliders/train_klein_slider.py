@@ -13,12 +13,12 @@ from diffusers.training_utils import compute_density_for_timestep_sampling
 from diffusers.optimization import get_scheduler
 
 import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from klein_sliders.utils.model_util import load_klein_models
-from klein_sliders.utils.train_util import encode_prompt_klein
-from klein_sliders.utils.lora import LoRANetwork, DEFAULT_TARGET_REPLACE
-from klein_sliders.utils.custom_klein_pipeline import KleinPipeline
+from utils.model_util import load_klein_models
+from utils.train_util import encode_prompt_klein
+from utils.lora import LoRANetwork, DEFAULT_TARGET_REPLACE
+from utils.custom_klein_pipeline import KleinPipeline
 
 
 def parse_args():
