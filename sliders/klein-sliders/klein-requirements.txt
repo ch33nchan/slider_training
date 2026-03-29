@@ -1,0 +1,24 @@
+bitsandbytes
+dadaptation
+# diffusers >= 0.33.0 required for Flux2Transformer2DModel support
+diffusers>=0.33.0
+torchvision
+accelerate
+transformers>=4.45.0
+lion_pytorch
+lpips
+matplotlib
+numpy
+opencv_python
+opencv_python_headless
+pandas
+Pillow
+prodigyopt
+pydantic
+PyYAML
+Requests
+safetensors
+torch
+tqdm
+wandb
+peft>=0.12.0

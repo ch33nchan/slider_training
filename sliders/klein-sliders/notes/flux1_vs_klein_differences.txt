@@ -1,0 +1,92 @@
+FLUX.1-dev vs FLUX.2-klein-4B: Concept Sliders Differences
+------------------------------------------------------------
+
+The core slider algorithm does not change between the two models. The contrastive LoRA loss
+(gt_pred = target_pred + eta * (positive_pred - negative_pred)) is architecture-agnostic.
+What changes is how you load the model, encode text, and run the forward pass.
+
+
+TEXT ENCODING
+
+FLUX.1-dev uses two text encoders: CLIP and T5-XXL. During training, both are called
+separately and their outputs are concatenated. The result is a prompt_embeds tensor
+(from T5) and a pooled_prompt_embeds tensor (from CLIP). Both are passed to the
+transformer at every forward call.
+
+FLUX.2-klein uses a single Qwen3 text encoder. You call it once with
+output_hidden_states=True and extract the hidden states at three intermediate layers:
+layers 9, 18, and 27. These three tensors are concatenated along the hidden dimension
+and become encoder_hidden_states. There is no pooled embedding. Nothing gets passed
+as pooled_projections.
+
+
+TRANSFORMER ARCHITECTURE
+
+FLUX.1-dev uses FluxTransformer2DModel. The attention modules inside it are named
+Attention in diffusers. The LoRA code targets these by class name.
+
+FLUX.2-klein uses Flux2Transformer2DModel. The attention modules are Flux2Attention
+and Flux2ParallelSelfAttention. The LoRA target list in lora.py already has these
+two class names stubbed in. The path names of these modules inside the transformer
+use single_transformer_blocks and transformer_blocks, not up_block or down_block
+or mid_block. This matters because the existing train-method filters in lora.py
+(noxattn, selfattn, xattn-up, xattn-down, xattn-mid) are all based on UNet path
+naming and will not work correctly with Klein. For the initial implementation we
+support only xattn (all attention modules) and full (all layers).
+
+
+CLASSIFIER-FREE GUIDANCE
+
+FLUX.1-dev does CFG by doubling the batch: the latent is concatenated with itself,
+one copy runs with the unconditional embedding and one with the conditional. After
+the forward pass the two predictions are split and combined with the guidance scale.
+
+FLUX.2-klein handles guidance differently. A guidance scale value is passed as a
+scalar tensor directly into the transformer. The batch does not get doubled. This
+simplifies the predict_noise function and reduces memory usage during training.
+The transformer has a config flag called guidance_embeds. For the undistilled base
+model this is True, meaning the guidance tensor is expected. For distilled/schnell
+style variants it is False. Always check this flag after loading the model.
+
+
+PIPELINE AND FORWARD CALL
+
+When calling the transformer forward in FLUX.1-dev you pass:
+hidden_states, timestep, encoder_hidden_states, pooled_projections, txt_ids, img_ids
+
+For FLUX.2-klein the call changes to:
+hidden_states, timestep, encoder_hidden_states, img_ids, guidance
+
+pooled_projections is removed entirely. txt_ids may or may not be needed depending
+on whether the Klein transformer uses rotary position embeddings for text tokens.
+Run inspect.signature(transformer.forward) on the server after loading to confirm
+the exact argument list before writing any training code.
+
+
+LATENT GEOMETRY AND VAE
+
+These do not change. Both models use the same 16-channel VAE, the same patchify-by-2
+spatial packing (_pack_latents, _unpack_latents), and the same 3D positional ID
+construction (_prepare_latent_image_ids). FlowMatchEulerDiscreteScheduler is used
+by both. The scaling_factor and shift_factor from the VAE config work the same way.
+
+
+TRAINING MODEL VARIANT
+
+For FLUX.1-dev you train against the dev checkpoint directly.
+For FLUX.2-klein you should use FLUX.2-klein-base-4B, not the standard FLUX.2-klein-4B.
+The standard release is step-distilled to 4 inference steps. Distillation removes the
+training signal needed for LoRA. The base variant is undistilled and is the correct
+starting point for fine-tuning, the same reason you would use FLUX.1-dev over
+FLUX.1-schnell for training sliders.
+
+
+THINGS THAT DO NOT CHANGE
+
+The slider loss formula.
+The ExitStack-based LoRA activation and deactivation during the training step.
+The _pack_latents, _unpack_latents, and _prepare_latent_image_ids helpers.
+The timestep sampling and sigma computation.
+The LoRAModule forward hook, save_weights, and set_lora_slider methods.
+All optimizer and learning rate scheduler helpers.
+The inference visualization loop.
