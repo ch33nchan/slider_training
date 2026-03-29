@@ -104,9 +104,16 @@ def main():
 
     mu = calculate_shift(image_seq_len)
 
-    # Independent copy for sampling timestep indices
+    # Scheduler with full num_train_timesteps — for index → actual timestep value lookup.
+    # indices are in [0, num_train_timesteps-1], so we need that many elements.
     noise_scheduler_copy = copy.deepcopy(scheduler)
-    noise_scheduler_copy.set_timesteps(args.num_inference_steps, device=device, mu=mu)
+    noise_scheduler_copy.set_timesteps(
+        noise_scheduler_copy.config.num_train_timesteps, device=device, mu=mu
+    )
+
+    # Scheduler with num_inference_steps — used inside partial_denoise().
+    denoise_scheduler = copy.deepcopy(scheduler)
+    denoise_scheduler.set_timesteps(args.num_inference_steps, device=device, mu=mu)
 
     print("Encoding prompts ...")
     with torch.no_grad():
@@ -157,12 +164,14 @@ def main():
             logit_std=logit_std,
             mode_scale=mode_scale,
         )
+        # indices in [0, num_train_timesteps-1]; noise_scheduler_copy has that many steps
         indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
         timesteps = noise_scheduler_copy.timesteps[indices].to(device=device)
-        # Map noise_scheduler index → denoising step index
-        timestep_to_infer = (
-            indices[0] * (args.num_inference_steps / noise_scheduler_copy.config.num_train_timesteps)
-        ).long().item()
+        # Map to denoising step index for denoise_scheduler (num_inference_steps steps)
+        timestep_to_infer = min(
+            int(indices[0].item() * args.num_inference_steps / noise_scheduler_copy.config.num_train_timesteps),
+            args.num_inference_steps - 1,
+        )
 
         # ---- Get noisy latents x_t via partial denoising ----
         noise = torch.randn(
@@ -174,7 +183,7 @@ def main():
         if timestep_to_infer > 0:
             packed_noisy = partial_denoise(
                 transformer,
-                noise_scheduler_copy,
+                denoise_scheduler,
                 packed_noisy,
                 target_embeds,
                 latent_image_ids,
