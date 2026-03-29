@@ -3,12 +3,11 @@ import sys
 import argparse
 import torch
 from PIL import Image
+from diffusers import Flux2KleinPipeline
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from utils.model_util import load_klein_models
 from utils.lora import LoRANetwork, DEFAULT_TARGET_REPLACE
-from utils.custom_klein_pipeline import KleinPipeline
 
 
 def parse_args():
@@ -41,66 +40,68 @@ def main():
     scales = [float(s) for s in args.scales.split(',')]
     os.makedirs(args.output_dir, exist_ok=True)
 
-    print(f"Loading models from {args.model_id} ...")
-    tokenizer, text_encoder, transformer, scheduler, vae = load_klein_models(
-        args.model_id, weight_dtype=weight_dtype
-    )
-    vae.to(device)
-    transformer.to(device)
-    text_encoder.to(device)
+    print(f"Loading pipeline from {args.model_id} ...")
+    pipe = Flux2KleinPipeline.from_pretrained(
+        args.model_id,
+        torch_dtype=weight_dtype,
+    ).to(device)
+    pipe.set_progress_bar_config(disable=True)
 
     print(f"Loading LoRA from {args.lora_path} ...")
     network = LoRANetwork(
-        transformer,
+        pipe.transformer,
         rank=args.rank,
         multiplier=1.0,
         alpha=args.alpha,
         train_method=args.train_method,
     ).to(device, dtype=weight_dtype)
     network.load_state_dict(torch.load(args.lora_path, map_location=device))
+    # LoRA is hooked into the transformer linear layers via apply_to().
+    # Deactivate by default (multiplier=0 after __exit__); enable with 'with network:'.
+    network.__exit__(None, None, None)
     print("LoRA loaded.")
-
-    pipe = KleinPipeline(scheduler, vae, text_encoder, tokenizer, transformer)
-    pipe.set_progress_bar_config(disable=True)
 
     seeds = [args.seed + i for i in range(args.num_images)]
 
     for seed in seeds:
-        generator = torch.Generator(device=device).manual_seed(seed)
         row = []
 
         for scale in scales:
             network.set_lora_slider(scale=scale)
+            generator = torch.Generator(device=device).manual_seed(seed)
+
             with torch.no_grad():
-                if scale == 0:
+                if scale == 0.0:
+                    # No LoRA — call pipe normally (multiplier already 0)
                     result = pipe(
                         args.prompt,
                         height=args.height,
                         width=args.width,
                         num_inference_steps=args.num_inference_steps,
-                        generator=torch.Generator(device=device).manual_seed(seed),
+                        generator=generator,
                         output_type='pil',
                     )
                 else:
-                    result = pipe(
-                        args.prompt,
-                        height=args.height,
-                        width=args.width,
-                        num_inference_steps=args.num_inference_steps,
-                        generator=torch.Generator(device=device).manual_seed(seed),
-                        output_type='pil',
-                        network=network,
-                        skip_slider_timestep_till=0,
-                    )
+                    # Enable LoRA for the full denoising pass
+                    with network:
+                        result = pipe(
+                            args.prompt,
+                            height=args.height,
+                            width=args.width,
+                            num_inference_steps=args.num_inference_steps,
+                            generator=generator,
+                            output_type='pil',
+                        )
+
             row.append(result.images[0])
 
-        # save each scale individually
+        # Save individual images
         for img, scale in zip(row, scales):
             fname = f"seed{seed}_scale{scale:+.1f}.png"
             img.save(os.path.join(args.output_dir, fname))
             print(f"  saved {fname}")
 
-        # also save a side-by-side strip
+        # Save side-by-side strip
         total_w = sum(img.width for img in row)
         strip = Image.new('RGB', (total_w, args.height))
         x = 0

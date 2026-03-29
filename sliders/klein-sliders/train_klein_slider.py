@@ -15,10 +15,14 @@ from diffusers.optimization import get_scheduler
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from utils.model_util import load_klein_models
+from utils.model_util import load_klein_pipeline
 from utils.train_util import encode_prompt_klein
 from utils.lora import LoRANetwork, DEFAULT_TARGET_REPLACE
-from utils.custom_klein_pipeline import KleinPipeline
+from utils.custom_klein_pipeline import (
+    prepare_latent_image_ids,
+    pack_latents,
+    partial_denoise,
+)
 
 
 def parse_args():
@@ -27,7 +31,7 @@ def parse_args():
     parser.add_argument('--target_prompt', type=str, required=True,
                         help='neutral subject prompt, e.g. "a photo of a person"')
     parser.add_argument('--positive_prompt', type=str, required=True,
-                        help='prompt for the concept to enhance, e.g. "a photo of a person looking right"')
+                        help='concept to enhance, e.g. "a photo of a person looking right"')
     parser.add_argument('--negative_prompt', type=str, required=True,
                         help='opposite concept, e.g. "a photo of a person looking left"')
     parser.add_argument('--slider_name', type=str, default='klein-slider')
@@ -48,17 +52,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def get_sigmas(timesteps, noise_scheduler_copy, n_dim=4, device='cuda:0', dtype=torch.bfloat16):
-    sigmas = noise_scheduler_copy.sigmas.to(device=device, dtype=dtype)
-    schedule_timesteps = noise_scheduler_copy.timesteps.to(device)
-    timesteps = timesteps.to(device)
-    step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
-    sigma = sigmas[step_indices].flatten()
-    while len(sigma.shape) < n_dim:
-        sigma = sigma.unsqueeze(-1)
-    return sigma
-
-
 def flush():
     torch.cuda.empty_cache()
     gc.collect()
@@ -77,15 +70,21 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     print(f"Loading models from {args.model_id} ...")
-    tokenizer, text_encoder, transformer, scheduler, vae = load_klein_models(
-        args.model_id, weight_dtype=weight_dtype
-    )
+    pipe = load_klein_pipeline(args.model_id, weight_dtype=weight_dtype)
+
+    transformer = pipe.transformer
+    vae = pipe.vae
+    text_encoder = pipe.text_encoder
+    tokenizer = pipe.tokenizer
+    scheduler = pipe.scheduler
 
     vae.to(device)
     transformer.to(device)
     text_encoder.to(device)
 
+    # Independent copy for sampling timestep indices
     noise_scheduler_copy = copy.deepcopy(scheduler)
+    noise_scheduler_copy.set_timesteps(args.num_inference_steps, device=device)
 
     print("Encoding prompts ...")
     with torch.no_grad():
@@ -98,6 +97,16 @@ def main():
         )
         target_embeds, positive_embeds, negative_embeds = all_embeds.chunk(3)
 
+    # Latent geometry (fixed for this run)
+    VAE_SCALE = 2 ** len(vae.config.block_out_channels)
+    LATENT_C = transformer.config.in_channels // 4
+    latent_h = args.height // VAE_SCALE   # spatial height in latent space
+    latent_w = args.width // VAE_SCALE
+    bsz = 1
+
+    latent_image_ids = prepare_latent_image_ids(bsz, latent_h, latent_w, device, weight_dtype)
+    txt_ids = torch.zeros(bsz, target_embeds.shape[1], 4, device=device, dtype=weight_dtype)
+
     print(f"Setting up LoRA (rank={args.rank}, method={args.train_method}) ...")
     network = LoRANetwork(
         transformer,
@@ -109,7 +118,6 @@ def main():
 
     optimizer = AdamW(network.prepare_optimizer_params(), lr=args.lr)
     optimizer.zero_grad()
-    criteria = torch.nn.MSELoss()
 
     lr_scheduler = get_scheduler(
         'constant',
@@ -118,36 +126,15 @@ def main():
         num_training_steps=args.max_train_steps,
     )
 
-    pipe = KleinPipeline(scheduler, vae, text_encoder, tokenizer, transformer)
-    pipe.set_progress_bar_config(disable=True)
-
-    vae_scale_factor = 2 ** (len(vae.config.block_out_channels))
-
-    # compute unpack shape once
-    with torch.no_grad():
-        sample_packed = pipe(
-            args.target_prompt,
-            height=args.height,
-            width=args.width,
-            num_inference_steps=args.num_inference_steps,
-            max_sequence_length=args.max_sequence_length,
-            from_timestep=0,
-            till_timestep=1,
-            output_type='latent',
-        )
-        model_input_shape = KleinPipeline._unpack_latents(
-            sample_packed, args.height, args.width, vae_scale_factor
-        ).shape
-
     weighting_scheme = 'none'
     logit_mean, logit_std, mode_scale = 0.0, 1.0, 1.29
-    bsz = 1
 
     losses = []
     progress_bar = tqdm(range(args.max_train_steps), desc="Training")
 
     for step in range(args.max_train_steps):
 
+        # Sample a random denoising timestep
         u = compute_density_for_timestep_sampling(
             weighting_scheme=weighting_scheme,
             batch_size=bsz,
@@ -157,43 +144,34 @@ def main():
         )
         indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
         timesteps = noise_scheduler_copy.timesteps[indices].to(device=device)
+        # Map noise_scheduler index → denoising step index
         timestep_to_infer = (
             indices[0] * (args.num_inference_steps / noise_scheduler_copy.config.num_train_timesteps)
         ).long().item()
 
-        # get x_t: run denoising up to the sampled timestep
-        with torch.no_grad():
-            packed_noisy = pipe(
-                args.target_prompt,
-                height=args.height,
-                width=args.width,
-                num_inference_steps=args.num_inference_steps,
-                max_sequence_length=args.max_sequence_length,
-                num_images_per_prompt=bsz,
-                from_timestep=0,
-                till_timestep=timestep_to_infer,
-                output_type='latent',
+        # ---- Get noisy latents x_t via partial denoising ----
+        noise = torch.randn(
+            bsz, LATENT_C, latent_h, latent_w,
+            generator=torch.Generator().manual_seed(args.seed + step),
+        ).to(device=device, dtype=weight_dtype)
+        packed_noisy = pack_latents(noise, bsz, LATENT_C, latent_h, latent_w)
+
+        if timestep_to_infer > 0:
+            packed_noisy = partial_denoise(
+                transformer,
+                noise_scheduler_copy,
+                packed_noisy,
+                target_embeds,
+                latent_image_ids,
+                txt_ids,
+                weight_dtype,
+                start_step=0,
+                end_step=timestep_to_infer,
             )
 
-        latent_image_ids = KleinPipeline._prepare_latent_image_ids(
-            model_input_shape[0],
-            model_input_shape[2],
-            model_input_shape[3],
-            device,
-            weight_dtype,
-        )
-
-        # txt_ids: 4 channels to match Klein's pos_embed (same as img_ids)
-        txt_ids = torch.zeros(
-            bsz, target_embeds.shape[1], 4,
-            device=device, dtype=weight_dtype,
-        )
-
-        # guidance is None — guidance_embeds=False for this model
-        guidance = None
-
+        # ---- Transformer forward helper ----
         def transformer_forward(embeds):
-            return transformer(
+            noise_pred = transformer(
                 hidden_states=packed_noisy,
                 timestep=timesteps / 1000,
                 encoder_hidden_states=embeds,
@@ -201,41 +179,21 @@ def main():
                 txt_ids=txt_ids,
                 return_dict=False,
             )[0]
+            # Klein output includes context tokens; slice to latent patch count.
+            return noise_pred[:, : packed_noisy.size(1)]
 
-        # forward with LoRA active (target prompt)
+        # ---- Forward with LoRA active (target prompt) ----
         with ExitStack() as stack:
             stack.enter_context(network)
             model_pred = transformer_forward(target_embeds)
 
-        model_pred = KleinPipeline._unpack_latents(
-            model_pred,
-            int(model_input_shape[2] * vae_scale_factor / 2),
-            int(model_input_shape[3] * vae_scale_factor / 2),
-            vae_scale_factor,
-        )
-
-        # frozen forward passes for gt construction
+        # ---- Frozen reference forwards for slider target ----
         with torch.no_grad():
-            target_pred = KleinPipeline._unpack_latents(
-                transformer_forward(target_embeds),
-                int(model_input_shape[2] * vae_scale_factor / 2),
-                int(model_input_shape[3] * vae_scale_factor / 2),
-                vae_scale_factor,
-            )
-            positive_pred = KleinPipeline._unpack_latents(
-                transformer_forward(positive_embeds),
-                int(model_input_shape[2] * vae_scale_factor / 2),
-                int(model_input_shape[3] * vae_scale_factor / 2),
-                vae_scale_factor,
-            )
-            negative_pred = KleinPipeline._unpack_latents(
-                transformer_forward(negative_embeds),
-                int(model_input_shape[2] * vae_scale_factor / 2),
-                int(model_input_shape[3] * vae_scale_factor / 2),
-                vae_scale_factor,
-            )
+            target_pred = transformer_forward(target_embeds)
+            positive_pred = transformer_forward(positive_embeds)
+            negative_pred = transformer_forward(negative_embeds)
 
-            # concept slider target: steer toward positive, away from negative
+            # Concept slider loss target in packed space (no unpack needed)
             gt_pred = target_pred + args.eta * (positive_pred - negative_pred)
             gt_pred = (gt_pred / gt_pred.norm()) * positive_pred.norm()
 
@@ -251,7 +209,10 @@ def main():
         optimizer.zero_grad()
 
         progress_bar.update(1)
-        progress_bar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{lr_scheduler.get_last_lr()[0]:.6f}")
+        progress_bar.set_postfix(
+            loss=f"{loss.item():.4f}",
+            lr=f"{lr_scheduler.get_last_lr()[0]:.6f}",
+        )
 
         if (step + 1) % args.save_every == 0 or (step + 1) == args.max_train_steps:
             save_path = os.path.join(args.output_dir, f"{args.slider_name}_step{step+1}.pt")
