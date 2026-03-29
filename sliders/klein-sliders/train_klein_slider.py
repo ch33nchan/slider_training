@@ -82,9 +82,31 @@ def main():
     transformer.to(device)
     text_encoder.to(device)
 
+    # Latent geometry (needed for mu before prompt encoding)
+    VAE_SCALE = 2 ** len(vae.config.block_out_channels)
+    LATENT_C = transformer.config.in_channels // 4
+    latent_h = args.height // VAE_SCALE
+    latent_w = args.width // VAE_SCALE
+    bsz = 1
+    # Packed token count: (H/2) * (W/2)
+    image_seq_len = (latent_h // 2) * (latent_w // 2)
+
+    # Compute shift mu for dynamic shifting scheduler
+    def calculate_shift(seq_len):
+        cfg = scheduler.config
+        base_seq = getattr(cfg, 'base_image_seq_len', 256)
+        max_seq = getattr(cfg, 'max_image_seq_len', 4096)
+        base_shift = getattr(cfg, 'base_shift', 0.5)
+        max_shift = getattr(cfg, 'max_shift', 1.16)
+        m = (max_shift - base_shift) / (max_seq - base_seq)
+        b = base_shift - m * base_seq
+        return seq_len * m + b
+
+    mu = calculate_shift(image_seq_len)
+
     # Independent copy for sampling timestep indices
     noise_scheduler_copy = copy.deepcopy(scheduler)
-    noise_scheduler_copy.set_timesteps(args.num_inference_steps, device=device)
+    noise_scheduler_copy.set_timesteps(args.num_inference_steps, device=device, mu=mu)
 
     print("Encoding prompts ...")
     with torch.no_grad():
@@ -96,13 +118,6 @@ def main():
             device=device,
         )
         target_embeds, positive_embeds, negative_embeds = all_embeds.chunk(3)
-
-    # Latent geometry (fixed for this run)
-    VAE_SCALE = 2 ** len(vae.config.block_out_channels)
-    LATENT_C = transformer.config.in_channels // 4
-    latent_h = args.height // VAE_SCALE   # spatial height in latent space
-    latent_w = args.width // VAE_SCALE
-    bsz = 1
 
     latent_image_ids = prepare_latent_image_ids(bsz, latent_h, latent_w, device, weight_dtype)
     txt_ids = torch.zeros(bsz, target_embeds.shape[1], 4, device=device, dtype=weight_dtype)
