@@ -161,7 +161,13 @@ class KleinPipeline(DiffusionPipeline):
         prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
         prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
 
-        return prompt_embeds
+        # txt_ids: confirmed present in Flux2Transformer2DModel.forward signature
+        txt_ids = torch.zeros(
+            batch_size * num_images_per_prompt, seq_len, 3,
+            device=device, dtype=self.text_encoder.dtype,
+        )
+
+        return prompt_embeds, txt_ids
 
     def encode_prompt(
         self,
@@ -169,19 +175,20 @@ class KleinPipeline(DiffusionPipeline):
         device: Optional[torch.device] = None,
         num_images_per_prompt: int = 1,
         prompt_embeds: Optional[torch.FloatTensor] = None,
+        txt_ids: Optional[torch.FloatTensor] = None,
         max_sequence_length: int = 512,
-    ) -> torch.FloatTensor:
+    ):
         device = device or self._execution_device
 
         if prompt_embeds is None:
-            prompt_embeds = self._get_qwen3_prompt_embeds(
+            prompt_embeds, txt_ids = self._get_qwen3_prompt_embeds(
                 prompt=prompt,
                 num_images_per_prompt=num_images_per_prompt,
                 max_sequence_length=max_sequence_length,
                 device=device,
             )
 
-        return prompt_embeds
+        return prompt_embeds, txt_ids
 
     @staticmethod
     def _prepare_latent_image_ids(batch_size, height, width, device, dtype):
@@ -293,7 +300,7 @@ class KleinPipeline(DiffusionPipeline):
 
         device = self._execution_device
 
-        prompt_embeds = self.encode_prompt(
+        prompt_embeds, txt_ids = self.encode_prompt(
             prompt=prompt,
             prompt_embeds=prompt_embeds,
             device=device,
@@ -352,12 +359,13 @@ class KleinPipeline(DiffusionPipeline):
 
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
-                # Build transformer kwargs — no pooled_projections, no txt_ids
+                # Build transformer kwargs — no pooled_projections (not in Klein's signature)
                 transformer_kwargs = dict(
                     hidden_states=latents,
                     timestep=timestep / 1000,
                     encoder_hidden_states=prompt_embeds,
                     img_ids=latent_image_ids,
+                    txt_ids=txt_ids,
                     return_dict=False,
                 )
                 if guidance is not None:
@@ -399,7 +407,8 @@ class KleinPipeline(DiffusionPipeline):
             return latents
 
         latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
-        latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
+        shift_factor = self.vae.config.shift_factor or 0.0
+        latents = (latents / self.vae.config.scaling_factor) + shift_factor
         image = self.vae.decode(latents, return_dict=False)[0]
         image = self.image_processor.postprocess(image, output_type=output_type)
 

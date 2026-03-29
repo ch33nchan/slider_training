@@ -88,12 +88,22 @@ def predict_noise_klein(
     else:
         guidance = None
 
-    # pooled_projections and txt_ids are FLUX.1 arguments — not used in Klein.
+    # txt_ids: zero tensor of shape [batch, seq_len, 3] — confirmed present in forward signature
+    txt_ids = torch.zeros(
+        packed_latents.shape[0],
+        encoder_hidden_states.shape[1],
+        3,
+        device=packed_latents.device,
+        dtype=packed_latents.dtype,
+    )
+
+    # pooled_projections is a FLUX.1 argument — not in Klein's forward signature
     kwargs = dict(
         hidden_states=packed_latents,
         timestep=timestep / 1000,
         encoder_hidden_states=encoder_hidden_states,
         img_ids=latent_image_ids,
+        txt_ids=txt_ids,
         return_dict=False,
     )
     if guidance is not None:
