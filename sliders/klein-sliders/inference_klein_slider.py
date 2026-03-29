@@ -70,28 +70,20 @@ def main():
             network.set_lora_slider(scale=scale)
             generator = torch.Generator(device=device).manual_seed(seed)
 
+            pipe_kwargs = dict(
+                prompt=args.prompt,
+                height=args.height,
+                width=args.width,
+                num_inference_steps=args.num_inference_steps,
+                generator=generator,
+                output_type='pil',
+            )
             with torch.no_grad():
                 if scale == 0.0:
-                    # No LoRA — call pipe normally (multiplier already 0)
-                    result = pipe(
-                        args.prompt,
-                        height=args.height,
-                        width=args.width,
-                        num_inference_steps=args.num_inference_steps,
-                        generator=generator,
-                        output_type='pil',
-                    )
+                    result = pipe(**pipe_kwargs)
                 else:
-                    # Enable LoRA for the full denoising pass
                     with network:
-                        result = pipe(
-                            args.prompt,
-                            height=args.height,
-                            width=args.width,
-                            num_inference_steps=args.num_inference_steps,
-                            generator=generator,
-                            output_type='pil',
-                        )
+                        result = pipe(**pipe_kwargs)
 
             row.append(result.images[0])
 
