@@ -88,11 +88,11 @@ def predict_noise_klein(
     else:
         guidance = None
 
-    # txt_ids: zero tensor of shape [batch, seq_len, 3] — confirmed present in forward signature
+    # txt_ids: 4 channels to match Klein's pos_embed (same as img_ids)
     txt_ids = torch.zeros(
         packed_latents.shape[0],
         encoder_hidden_states.shape[1],
-        3,
+        4,
         device=packed_latents.device,
         dtype=packed_latents.dtype,
     )

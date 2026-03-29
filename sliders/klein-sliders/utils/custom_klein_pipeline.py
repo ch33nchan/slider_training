@@ -161,9 +161,9 @@ class KleinPipeline(DiffusionPipeline):
         prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
         prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
 
-        # txt_ids: confirmed present in Flux2Transformer2DModel.forward signature
+        # txt_ids: 4 channels to match Klein's pos_embed (same as img_ids)
         txt_ids = torch.zeros(
-            batch_size * num_images_per_prompt, seq_len, 3,
+            batch_size * num_images_per_prompt, seq_len, 4,
             device=device, dtype=self.text_encoder.dtype,
         )
 
@@ -192,9 +192,11 @@ class KleinPipeline(DiffusionPipeline):
 
     @staticmethod
     def _prepare_latent_image_ids(batch_size, height, width, device, dtype):
-        latent_image_ids = torch.zeros(height // 2, width // 2, 3)
+        # Klein's pos_embed iterates over 4 dimensions, not 3 like FLUX.1
+        latent_image_ids = torch.zeros(height // 2, width // 2, 4)
         latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height // 2)[:, None]
         latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width // 2)[None, :]
+        # index 0 and 3 remain 0
 
         latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
         latent_image_ids = latent_image_ids[None, :].repeat(batch_size, 1, 1, 1)

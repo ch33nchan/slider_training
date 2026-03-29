@@ -183,9 +183,9 @@ def main():
             weight_dtype,
         )
 
-        # build txt_ids for target embeddings
+        # txt_ids: 4 channels to match Klein's pos_embed (same as img_ids)
         txt_ids = torch.zeros(
-            bsz, target_embeds.shape[1], 3,
+            bsz, target_embeds.shape[1], 4,
             device=device, dtype=weight_dtype,
         )
 
