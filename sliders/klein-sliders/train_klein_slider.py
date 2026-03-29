@@ -157,6 +157,10 @@ def main():
     for step in range(args.max_train_steps):
 
         # Sample a random denoising timestep
+        # Reset denoise_scheduler each step — FlowMatchEulerDiscreteScheduler is
+        # stateful (_step_index advances on each .step() call and must be reset).
+        denoise_scheduler.set_timesteps(args.num_inference_steps, device=device, mu=mu)
+
         u = compute_density_for_timestep_sampling(
             weighting_scheme=weighting_scheme,
             batch_size=bsz,
