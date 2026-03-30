@@ -32,6 +32,7 @@ from models.autoencoder import AutoEncoder, AutoEncoderParams
 from models.sampling import (
     batched_prc_img,
     batched_prc_txt,
+    default_prep,
     encode_image_refs,
     get_schedule,
     scatter_ids,
@@ -133,6 +134,8 @@ def main():
     )
     parser.add_argument("--num_steps", type=int, default=28)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--strength", type=float, default=0.6,
+                        help="img2img strength 0-1: 0=no change, 1=full regen from noise")
     parser.add_argument("--output", type=str, default="outputs/inference_result.png")
     args = parser.parse_args()
 
@@ -160,7 +163,7 @@ def main():
     txt, txt_ids = batched_prc_txt(prompt_embeds)
 
     # -------------------------------------------------------------------------
-    # Encode source image as reference tokens
+    # Encode source image as reference tokens + as starting latent (img2img)
     # -------------------------------------------------------------------------
     print("Encoding reference image...")
     source_img = Image.open(args.source_image).convert("RGB").resize(
@@ -169,6 +172,14 @@ def main():
     ref_tokens, ref_ids = encode_image_refs(vae, [source_img])
     ref_tokens = ref_tokens.to(device, dtype=dtype)
     ref_ids = ref_ids.to(device)
+
+    # Encode source as starting latent for img2img
+    source_tensor = default_prep(source_img, limit_pixels=cfg.height * cfg.width)
+    if isinstance(source_tensor, list):
+        source_tensor = source_tensor[0]
+    with torch.no_grad():
+        source_latent = vae.encode(source_tensor.unsqueeze(0).to(device, dtype=dtype))[0]
+    packed_source, _ = batched_prc_img(source_latent.unsqueeze(0))
 
     # -------------------------------------------------------------------------
     # Create LoRA network and load weights
@@ -199,7 +210,6 @@ def main():
         print(f"\nScale: {scale}")
         network.set_lora_slider(scale)
 
-        # Start from pure noise (same seed for consistency)
         generator = torch.Generator(device=device).manual_seed(args.seed)
         noise = torch.randn(
             1, 128, height_latent, width_latent,
@@ -207,15 +217,25 @@ def main():
         )
         packed_noise, noise_ids = batched_prc_img(noise)
 
-        # Schedule
         timesteps = get_schedule(args.num_steps, packed_noise.shape[1])
+
+        if args.strength >= 1.0:
+            # Full generation from noise
+            packed_start = packed_noise
+            timesteps_use = timesteps
+        else:
+            # img2img: blend source latent with noise at t_start, then denoise the rest
+            start_idx = int((1.0 - args.strength) * (len(timesteps) - 1))
+            t_start = timesteps[start_idx]
+            packed_start = (1.0 - t_start) * packed_source + t_start * packed_noise
+            timesteps_use = timesteps[start_idx:]
 
         # Denoise with reference conditioning + LoRA
         packed_output = denoise_img2img(
             transformer, network,
-            packed_noise, noise_ids,
+            packed_start, noise_ids,
             txt, txt_ids,
-            timesteps,
+            timesteps_use,
             ref_tokens, ref_ids,
             device, dtype,
         )
