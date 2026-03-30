@@ -167,12 +167,17 @@ def main():
     transformer.to(device)
     text_encoder.to(device)
 
-    # Latent geometry
-    VAE_SCALE = 2 ** len(vae.config.block_out_channels)
-    LATENT_C = transformer.config.in_channels // 4
-    latent_h = args.height // VAE_SCALE
-    latent_w = args.width // VAE_SCALE
     bsz = 1
+
+    # VAE encode all pairs first, then derive latent geometry from actual tensor shape
+    encoded_pairs = encode_images(vae, pairs, args.height, args.width, device, weight_dtype)
+
+    # Derive latent dims from the first encoded tensor (avoids VAE_SCALE guessing)
+    sample_lat = encoded_pairs[0][0]
+    LATENT_C = sample_lat.shape[1]
+    latent_h = sample_lat.shape[2]
+    latent_w = sample_lat.shape[3]
+    print(f"Latent shape: {sample_lat.shape}  (C={LATENT_C}, H={latent_h}, W={latent_w})")
     image_seq_len = (latent_h // 2) * (latent_w // 2)
 
     def calculate_shift(seq_len):
@@ -192,9 +197,6 @@ def main():
     noise_scheduler_copy.set_timesteps(
         noise_scheduler_copy.config.num_train_timesteps, device=device, mu=mu
     )
-
-    # VAE encode all pairs
-    encoded_pairs = encode_images(vae, pairs, args.height, args.width, device, weight_dtype)
 
     # Pack each encoded latent
     packed_pairs = []
