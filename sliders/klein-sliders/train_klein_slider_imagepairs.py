@@ -121,7 +121,7 @@ def encode_images(vae, pairs, height, width, device, dtype):
         for path in (n_path, r_path, l_path):
             img = load_image_tensor(path, height, width).to(device, dtype=dtype)
             latent = vae.encode(img).latent_dist.sample()
-            latent = latent * vae.config.scaling_factor
+            latent = latent * vae.config.get('scaling_factor', 0.18215)
             triplet.append(latent)
         encoded.append(tuple(triplet))
         print(f"  encoded {os.path.basename(n_path)}")
