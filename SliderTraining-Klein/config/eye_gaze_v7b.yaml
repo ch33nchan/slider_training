@@ -2,9 +2,9 @@ transformer_path: "models/klein-9b/flux-2-klein-9b.safetensors"
 vae_path: "models/klein-9b/ae.safetensors"
 te_path: "Qwen/Qwen3-8B"
 device: "cuda:2"
-neg_image_dir: "data/eye_gaze_v7/neg/"
-pos_image_dir: "data/eye_gaze_v7/pos/"
-neutral_image_dir: "data/eye_gaze_v7/neutral/"
+neg_image_dir: "data/columbia_gaze/neg/"
+pos_image_dir: "data/columbia_gaze/pos/"
+neutral_image_dir: "data/columbia_gaze/neutral/"
 prompt: "a person"
 
 rank: 64
