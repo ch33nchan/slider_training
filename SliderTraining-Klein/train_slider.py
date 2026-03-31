@@ -60,6 +60,7 @@ from utils.lora import LoRANetwork
 class ImagePair:
     neg_path: str
     pos_path: str
+    neutral_path: str = None
 
 
 def load_transformer(path: str, device: str, dtype=torch.bfloat16):
@@ -88,8 +89,9 @@ def load_vae(path: str, device: str, dtype=torch.bfloat16):
     return vae
 
 
-def load_image_pairs(neg_dir: str, pos_dir: str):
-    """Load paired images from neg/ and pos/ directories, matched by filename."""
+def load_image_pairs(neg_dir: str, pos_dir: str, neutral_dir: str = None):
+    """Load paired images from neg/ and pos/ directories, matched by filename.
+    If neutral_dir is provided, also loads neutral images for bidirectional training."""
     exts = {".png", ".jpg", ".jpeg", ".webp"}
 
     neg_files = {
@@ -103,9 +105,24 @@ def load_image_pairs(neg_dir: str, pos_dir: str):
         if os.path.splitext(f)[1].lower() in exts
     }
 
+    neutral_files = {}
+    if neutral_dir and os.path.isdir(neutral_dir):
+        neutral_files = {
+            os.path.splitext(f)[0]: os.path.join(neutral_dir, f)
+            for f in os.listdir(neutral_dir)
+            if os.path.splitext(f)[1].lower() in exts
+        }
+
     # Match by stem (filename without extension)
     common_stems = sorted(set(neg_files.keys()) & set(pos_files.keys()))
-    pairs = [ImagePair(neg_path=neg_files[s], pos_path=pos_files[s]) for s in common_stems]
+    pairs = [
+        ImagePair(
+            neg_path=neg_files[s],
+            pos_path=pos_files[s],
+            neutral_path=neutral_files.get(s),
+        )
+        for s in common_stems
+    ]
     return pairs
 
 
@@ -258,8 +275,10 @@ def main():
     # -------------------------------------------------------------------------
     # Load image pairs
     # -------------------------------------------------------------------------
-    pairs = load_image_pairs(cfg.neg_image_dir, cfg.pos_image_dir)
-    print(f"Found {len(pairs)} image pairs")
+    neutral_dir = cfg.get("neutral_image_dir", None)
+    pairs = load_image_pairs(cfg.neg_image_dir, cfg.pos_image_dir, neutral_dir)
+    has_neutral = neutral_dir is not None and any(p.neutral_path for p in pairs)
+    print(f"Found {len(pairs)} image pairs (neutral dir: {'yes' if has_neutral else 'no'})")
     assert len(pairs) > 0, (
         f"No matching image pairs found in {cfg.neg_image_dir} and {cfg.pos_image_dir}"
     )
@@ -307,13 +326,20 @@ def main():
         neg_tensor, neg_pil = load_and_preprocess_image(pair.neg_path, cfg.height, cfg.width)
         pos_tensor, pos_pil = load_and_preprocess_image(pair.pos_path, cfg.height, cfg.width)
 
-        neg_tensor = neg_tensor.unsqueeze(0).to(device, dtype=dtype)
+        # Use neutral image as source for x_t if available (bidirectional training)
+        # Otherwise fall back to neg (original behavior)
+        if has_neutral and pair.neutral_path:
+            src_tensor, src_pil = load_and_preprocess_image(pair.neutral_path, cfg.height, cfg.width)
+        else:
+            src_tensor, src_pil = neg_tensor, neg_pil
 
-        # VAE encode neg image for noisy input
+        src_tensor_b = src_tensor.unsqueeze(0).to(device, dtype=dtype)
+
+        # VAE encode source image for noisy input
         with torch.no_grad():
-            neg_latent = vae.encode(neg_tensor)
+            src_latent = vae.encode(src_tensor_b)
 
-        # Reference tokens for both images
+        # Reference tokens for neg, pos, and source
         with torch.no_grad():
             ref_neg, ref_neg_ids = encode_image_refs(vae, [neg_pil])
             ref_neg = ref_neg.to(device, dtype=dtype)
@@ -323,13 +349,17 @@ def main():
             ref_pos = ref_pos.to(device, dtype=dtype)
             ref_pos_ids = ref_pos_ids.to(device)
 
+            ref_src, ref_src_ids = encode_image_refs(vae, [src_pil])
+            ref_src = ref_src.to(device, dtype=dtype)
+            ref_src_ids = ref_src_ids.to(device)
+
         # Sample random timestep t in [0, 1]
         t = torch.rand(1, device=device, dtype=dtype)
 
-        # FlowMatch noise: x_t = (1-t) * neg_latent + t * noise
-        noise = torch.randn_like(neg_latent)
+        # FlowMatch noise: x_t = (1-t) * src_latent + t * noise
+        noise = torch.randn_like(src_latent)
         t_expand = t.view(1, 1, 1, 1)
-        x_t = (1 - t_expand) * neg_latent + t_expand * noise
+        x_t = (1 - t_expand) * src_latent + t_expand * noise
 
         # Pack x_t to tokens
         packed_x_t, x_ids = batched_prc_img(x_t)
@@ -362,11 +392,13 @@ def main():
         gt = neg_pred + cfg.eta * (pos_pred - neg_pred)
         gt = (gt / gt.norm()) * pos_pred.norm()
 
-        # ----- One forward pass WITH LoRA (using neg ref as baseline) -----
+        # ----- One forward pass WITH LoRA (using source ref as baseline) -----
+        x_src = torch.cat([packed_x_t, ref_src], dim=1)
+        x_src_ids = torch.cat([x_ids, ref_src_ids], dim=1)
         with ExitStack() as stack:
             stack.enter_context(network)
             lora_pred = transformer(
-                x=x_neg, x_ids=x_neg_ids, timesteps=t_vec,
+                x=x_src, x_ids=x_src_ids, timesteps=t_vec,
                 ctx=neutral_txt, ctx_ids=neutral_txt_ids,
                 guidance=None,
             )
