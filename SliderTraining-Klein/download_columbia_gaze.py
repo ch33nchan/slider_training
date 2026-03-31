@@ -20,20 +20,44 @@ from pathlib import Path
 from urllib.request import urlretrieve
 
 
-DATASET_URL = "https://cave.cs.columbia.edu/old/databases/columbia_gaze/columbia_gaze.zip"
 SAVE_DIR = Path("data/columbia_gaze")
-ZIP_PATH = Path("data/columbia_gaze.zip")
+
+# Try multiple known URLs for the Columbia Gaze Dataset
+CANDIDATE_URLS = [
+    "https://cave.cs.columbia.edu/old/databases/columbia_gaze/columbia_gaze.zip",
+    "https://www.cs.columbia.edu/CAVE/databases/columbia_gaze/columbia_gaze.zip",
+    "http://cave.cs.columbia.edu/old/databases/columbia_gaze/columbia_gaze.zip",
+]
 
 
-def download_with_progress(url, dest):
-    def progress(block, block_size, total):
-        downloaded = block * block_size
-        if total > 0:
-            pct = downloaded / total * 100
-            print(f"\r  {pct:.1f}% ({downloaded // 1024 // 1024}MB)", end="", flush=True)
-    print(f"Downloading {url}")
-    urlretrieve(url, dest, reporthook=progress)
-    print()
+def try_download(dest: Path) -> bool:
+    import urllib.request
+    for url in CANDIDATE_URLS:
+        print(f"Trying {url} ...")
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                print(f"  Content-Type: {content_type}")
+                if "html" in content_type.lower():
+                    print(f"  Got HTML (likely a registration page) — skipping")
+                    continue
+                total = int(resp.headers.get("Content-Length", 0))
+                downloaded = 0
+                with open(dest, "wb") as f:
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total:
+                            print(f"\r  {downloaded/total*100:.1f}% ({downloaded//1024//1024}MB/{total//1024//1024}MB)", end="", flush=True)
+                print(f"\n  Downloaded {downloaded//1024//1024}MB")
+                return True
+        except Exception as e:
+            print(f"  Failed: {e}")
+    return False
 
 
 def main():
@@ -44,11 +68,32 @@ def main():
     for d in [neg_dir, pos_dir, neutral_dir]:
         d.mkdir(exist_ok=True)
 
+    ZIP_PATH = Path("data/columbia_gaze.zip")
+
     # Download
-    if not ZIP_PATH.exists():
-        download_with_progress(DATASET_URL, ZIP_PATH)
+    if ZIP_PATH.exists() and ZIP_PATH.stat().st_size > 1_000_000:
+        print(f"ZIP already exists at {ZIP_PATH} ({ZIP_PATH.stat().st_size//1024//1024}MB)")
     else:
-        print(f"ZIP already exists at {ZIP_PATH}")
+        if ZIP_PATH.exists():
+            ZIP_PATH.unlink()
+        ok = try_download(ZIP_PATH)
+        if not ok:
+            print("\nAll download attempts failed.")
+            print("Please download manually from:")
+            print("  https://cave.cs.columbia.edu/old/databases/columbia_gaze/")
+            print("and save as data/columbia_gaze.zip")
+            return
+
+    # Verify it's actually a zip
+    if not zipfile.is_zipfile(ZIP_PATH):
+        print(f"ERROR: {ZIP_PATH} is not a valid zip file.")
+        print("The server likely returned an HTML page requiring registration.")
+        print("\nManual download instructions:")
+        print("  1. Visit: https://cave.cs.columbia.edu/old/databases/columbia_gaze/")
+        print("  2. Download the dataset zip")
+        print(f"  3. Place it at: {ZIP_PATH.absolute()}")
+        print("  4. Re-run this script")
+        return
 
     # Extract
     extract_dir = Path("data/columbia_gaze_raw")
