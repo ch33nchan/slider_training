@@ -22,7 +22,6 @@ mkdir -p outputs/eval
 
 run_inference() {
     local VERSION=$1
-    local GPU=$2
     local LORA_PATH="outputs/eye_gaze_${VERSION}/weights/slider_latest.safetensors"
     local CONFIG="config/eye_gaze_${VERSION}.yaml"
     local OUT="outputs/eval/result_${VERSION}.png"
@@ -32,8 +31,8 @@ run_inference() {
         return
     fi
 
-    echo "[$VERSION] Running inference on GPU $GPU..."
-    CUDA_VISIBLE_DEVICES=$GPU python inference_slider.py \
+    echo "[$VERSION] Running inference (device from config)..."
+    python inference_slider.py \
         --config "$CONFIG" \
         --lora_path "$LORA_PATH" \
         --source_image "$SOURCE" \
@@ -45,9 +44,9 @@ run_inference() {
 }
 
 # Run sequentially to avoid VRAM conflicts (each needs ~60GB)
-run_inference "v4" 1
-run_inference "v5" 2
-run_inference "v6" 3
+run_inference "v4"
+run_inference "v5"
+run_inference "v6"
 
 echo ""
 echo "All inference done. Results in outputs/eval/"
