@@ -89,6 +89,19 @@ def main():
     torch.save(mean_delta, args.output)
     print(f"Saved to {args.output}")
 
+    # Also save a masked version: keep only top-20% tokens by delta magnitude.
+    # These are the tokens that change most between left and right gaze — i.e.
+    # the eye/iris region — while zeroing out background/identity tokens.
+    token_norms = mean_delta[0].norm(dim=-1)  # (N,)
+    threshold = torch.quantile(token_norms, 0.80)
+    mask = (token_norms >= threshold).float().unsqueeze(0).unsqueeze(-1)  # (1, N, 1)
+    masked_delta = mean_delta * mask
+    masked_path = args.output.replace(".pt", "_masked.pt")
+    torch.save(masked_delta, masked_path)
+    n_kept = int(mask.sum().item())
+    print(f"Masked delta: kept {n_kept}/{mean_delta.shape[1]} tokens (top 20% by magnitude)")
+    print(f"Saved masked delta to {masked_path}")
+
 
 if __name__ == "__main__":
     main()
