@@ -299,8 +299,11 @@ def main():
         save_dir=str(output_dir),
     ).to(device, dtype=dtype)
 
-    params = network.prepare_optimizer_params()
+    train_lora_up = cfg.get("train_lora_up", False)
+    params = network.prepare_optimizer_params(train_lora_up=train_lora_up)
     optimizer = torch.optim.AdamW(params, lr=cfg.lr)
+    if train_lora_up:
+        print("  [train_lora_up=True] Both lora_down and lora_up are trainable.")
 
     # Count trainable parameters
     total_params = sum(p.numel() for pg in params for p in pg["params"])
@@ -315,6 +318,10 @@ def main():
     print(f"  Train method: {cfg.train_method}")
     print(f"  Prompt: \"{cfg.prompt}\"")
     print(f"  Image pairs: {len(pairs)}")
+
+    bidirectional = cfg.get("bidirectional", False)
+    if bidirectional:
+        print("  [bidirectional=True] Training both +scale and -scale directions per step.")
 
     losses = []
     scales = (-5, -2.5, 0, 2.5, 5)
@@ -388,26 +395,63 @@ def main():
             )
             pos_pred = pos_pred[:, :packed_x_t.shape[1]]
 
-        # Ground truth: directional target
-        gt = neg_pred + cfg.eta * (pos_pred - neg_pred)
-        gt = (gt / gt.norm()) * pos_pred.norm()
+        # Ground truth: directional target (forward: neutral → pos direction)
+        direction = pos_pred - neg_pred
+        gt_fwd = neg_pred + cfg.eta * direction
+        gt_fwd = (gt_fwd / gt_fwd.norm()) * pos_pred.norm()
 
-        # ----- One forward pass WITH LoRA (using source ref as baseline) -----
         x_src = torch.cat([packed_x_t, ref_src], dim=1)
         x_src_ids = torch.cat([x_ids, ref_src_ids], dim=1)
-        with ExitStack() as stack:
-            stack.enter_context(network)
-            lora_pred = transformer(
-                x=x_src, x_ids=x_src_ids, timesteps=t_vec,
-                ctx=neutral_txt, ctx_ids=neutral_txt_ids,
-                guidance=None,
-            )
-            lora_pred = lora_pred[:, :packed_x_t.shape[1]]
 
-        # MSE loss
-        loss = torch.mean(
-            ((lora_pred.float() - gt.float()) ** 2).reshape(gt.shape[0], -1), 1
-        ).mean()
+        if bidirectional:
+            # ----- Two LoRA passes: scale=+1 and scale=-1 -----
+            gt_bwd = pos_pred + cfg.eta * (-direction)
+            gt_bwd = (gt_bwd / gt_bwd.norm()) * neg_pred.norm()
+
+            network.set_lora_slider(1.0)
+            with ExitStack() as stack:
+                stack.enter_context(network)
+                lora_pred_fwd = transformer(
+                    x=x_src, x_ids=x_src_ids, timesteps=t_vec,
+                    ctx=neutral_txt, ctx_ids=neutral_txt_ids,
+                    guidance=None,
+                )
+                lora_pred_fwd = lora_pred_fwd[:, :packed_x_t.shape[1]]
+
+            network.set_lora_slider(-1.0)
+            with ExitStack() as stack:
+                stack.enter_context(network)
+                lora_pred_bwd = transformer(
+                    x=x_src, x_ids=x_src_ids, timesteps=t_vec,
+                    ctx=neutral_txt, ctx_ids=neutral_txt_ids,
+                    guidance=None,
+                )
+                lora_pred_bwd = lora_pred_bwd[:, :packed_x_t.shape[1]]
+
+            network.set_lora_slider(1.0)  # reset to default
+
+            loss_fwd = torch.mean(
+                ((lora_pred_fwd.float() - gt_fwd.float()) ** 2).reshape(gt_fwd.shape[0], -1), 1
+            ).mean()
+            loss_bwd = torch.mean(
+                ((lora_pred_bwd.float() - gt_bwd.float()) ** 2).reshape(gt_bwd.shape[0], -1), 1
+            ).mean()
+            loss = 0.5 * (loss_fwd + loss_bwd)
+        else:
+            # ----- One forward pass WITH LoRA (using source ref as baseline) -----
+            with ExitStack() as stack:
+                stack.enter_context(network)
+                lora_pred = transformer(
+                    x=x_src, x_ids=x_src_ids, timesteps=t_vec,
+                    ctx=neutral_txt, ctx_ids=neutral_txt_ids,
+                    guidance=None,
+                )
+                lora_pred = lora_pred[:, :packed_x_t.shape[1]]
+
+            # MSE loss
+            loss = torch.mean(
+                ((lora_pred.float() - gt_fwd.float()) ** 2).reshape(gt_fwd.shape[0], -1), 1
+            ).mean()
 
         loss.backward()
         optimizer.step()

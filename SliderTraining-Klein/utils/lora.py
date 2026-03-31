@@ -201,11 +201,19 @@ class LoRANetwork(nn.Module):
 
         return loras
 
-    def prepare_optimizer_params(self):
-        """Return only lora_down parameters for optimization."""
+    def prepare_optimizer_params(self, train_lora_up: bool = False):
+        """Return trainable LoRA parameters.
+
+        By default only lora_down is trained (lora_up is a fixed orthogonal
+        projection). Set train_lora_up=True to also optimise lora_up, giving
+        the LoRA full low-rank expressivity at the cost of 2× parameters.
+        """
         params = []
         for lora in self.loras:
             params.extend(lora.lora_down.parameters())
+            if train_lora_up:
+                lora.lora_up.weight.requires_grad_(True)
+                params.extend(lora.lora_up.parameters())
         return [{"params": params}]
 
     def save_weights(self, file: str, dtype=None, metadata: Optional[dict] = None):
