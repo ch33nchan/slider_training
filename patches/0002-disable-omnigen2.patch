@@ -1,0 +1,35 @@
+From ad50aa3fab6af07afa7e6e45731a0daa5a2954b8 Mon Sep 17 00:00:00 2001
+From: Srinivas Balasubramaniam <srini@Srinivass-MacBook-Pro-2.local>
+Date: Wed, 1 Apr 2026 13:51:24 +0530
+Subject: [PATCH] Disable OmniGen2 extension (crashes at import on CUDA <13.0)
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+---
+ extensions_built_in/diffusion_models/__init__.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/extensions_built_in/diffusion_models/__init__.py b/extensions_built_in/diffusion_models/__init__.py
+index ed4ffd7..1036e40 100644
+--- a/extensions_built_in/diffusion_models/__init__.py
++++ b/extensions_built_in/diffusion_models/__init__.py
+@@ -1,7 +1,7 @@
+ from .chroma import ChromaModel, ChromaRadianceModel
+ from .hidream import HidreamModel, HidreamE1Model
+ from .f_light import FLiteModel
+-from .omnigen2 import OmniGen2Model
++# from .omnigen2 import OmniGen2Model  # disabled: requires CUDA 13.0+
+ from .flux_kontext import FluxKontextModel
+ from .wan22 import Wan225bModel, Wan2214bModel, Wan2214bI2VModel
+ from .qwen_image import QwenImageModel, QwenImageEditModel, QwenImageEditPlusModel
+@@ -17,7 +17,7 @@ AI_TOOLKIT_MODELS = [
+     HidreamModel,
+     HidreamE1Model,
+     FLiteModel,
+-    OmniGen2Model,
++    # OmniGen2Model,  # disabled: requires CUDA 13.0+
+     FluxKontextModel,
+     Wan225bModel,
+     Wan2214bI2VModel,
+-- 
+2.52.0
+
