@@ -1,0 +1,69 @@
+From 8878453844532c25f1e8f210220113f02be31f6e Mon Sep 17 00:00:00 2001
+From: Srinivas Balasubramaniam <srini@Srinivass-MacBook-Pro-2.local>
+Date: Wed, 1 Apr 2026 13:16:50 +0530
+Subject: [PATCH] Fix Klein 9B compatibility in ImageReferenceSliderTrainer
+
+- randn_like(latents) replaces get_latent_noise to match Klein's 128-ch packed format
+- set_timesteps falls back to mu=0.5 for dynamic-shifting schedulers (Klein/Flux2)
+- get_noise_prediction guards batch=None to avoid attr error when no control images
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+---
+ .../diffusion_models/flux2/flux2_model.py     |  4 ++--
+ .../ImageReferenceSliderTrainerProcess.py     | 21 ++++++++++---------
+ 2 files changed, 13 insertions(+), 12 deletions(-)
+
+diff --git a/extensions_built_in/diffusion_models/flux2/flux2_model.py b/extensions_built_in/diffusion_models/flux2/flux2_model.py
+index c07cde4..5d03271 100644
+--- a/extensions_built_in/diffusion_models/flux2/flux2_model.py
++++ b/extensions_built_in/diffusion_models/flux2/flux2_model.py
+@@ -333,8 +333,8 @@ class Flux2Model(BaseModel):
+             img_cond_seq_ids: torch.Tensor | None = None
+ 
+             # handle control images
+-            batch_control_tensor_list = batch.control_tensor_list
+-            if batch_control_tensor_list is None and batch.control_tensor is not None:
++            batch_control_tensor_list = batch.control_tensor_list if batch is not None else None
++            if batch_control_tensor_list is None and batch is not None and batch.control_tensor is not None:
+                 batch_control_tensor_list = []
+                 for b in range(latent_model_input.shape[0]):
+                     batch_control_tensor_list.append(batch.control_tensor[b : b + 1])
+diff --git a/extensions_built_in/image_reference_slider_trainer/ImageReferenceSliderTrainerProcess.py b/extensions_built_in/image_reference_slider_trainer/ImageReferenceSliderTrainerProcess.py
+index 11fa8a9..8e9ea03 100644
+--- a/extensions_built_in/image_reference_slider_trainer/ImageReferenceSliderTrainerProcess.py
++++ b/extensions_built_in/image_reference_slider_trainer/ImageReferenceSliderTrainerProcess.py
+@@ -127,20 +127,21 @@ class ImageReferenceSliderTrainerProcess(BaseSDTrainProcess):
+             optimizer = self.optimizer
+             lr_scheduler = self.lr_scheduler
+ 
+-            self.sd.noise_scheduler.set_timesteps(
+-                self.train_config.max_denoising_steps, device=self.device_torch
+-            )
++            try:
++                self.sd.noise_scheduler.set_timesteps(
++                    self.train_config.max_denoising_steps, device=self.device_torch
++                )
++            except TypeError:
++                # dynamic-shifting schedulers (e.g. Klein/Flux2) require mu
++                self.sd.noise_scheduler.set_timesteps(
++                    self.train_config.max_denoising_steps, device=self.device_torch, mu=0.5
++                )
+ 
+             timesteps = torch.randint(0, self.train_config.max_denoising_steps, (1,), device=self.device_torch)
+             timesteps = timesteps.long()
+ 
+-            # get noise
+-            noise_positive = self.sd.get_latent_noise(
+-                pixel_height=height,
+-                pixel_width=width,
+-                batch_size=batch_size,
+-                noise_offset=self.train_config.noise_offset,
+-            ).to(self.device_torch, dtype=dtype)
++            # get noise — use randn_like to match actual latent shape (handles Klein's 128-ch packed format)
++            noise_positive = torch.randn_like(positive_latents).to(self.device_torch, dtype=dtype)
+ 
+             noise_negative = noise_positive.clone()
+ 
+-- 
+2.52.0
+
