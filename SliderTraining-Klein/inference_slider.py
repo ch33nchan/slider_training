@@ -95,8 +95,9 @@ def denoise_img2img(
     ):
         t_vec = torch.full((1,), t_curr, device=device, dtype=dtype)
 
-        img_input = torch.cat([img, ref_tokens], dim=1)
-        img_input_ids = torch.cat([noise_ids, ref_ids], dim=1)
+        # No reference conditioning — LoRA drives the concept direction
+        img_input = img
+        img_input_ids = noise_ids
 
         with network:
             pred = transformer(
