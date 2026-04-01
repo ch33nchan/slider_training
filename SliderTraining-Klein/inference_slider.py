@@ -185,16 +185,21 @@ def main():
     # Create LoRA network and load weights
     # -------------------------------------------------------------------------
     print("Loading LoRA weights...")
+    lora_sd = load_file(args.lora_path)
+    # detect rank from checkpoint
+    lora_rank = cfg.rank
+    for k, v in lora_sd.items():
+        if "lora_A" in k or "lora_down" in k:
+            lora_rank = v.shape[0]
+            break
     network = LoRANetwork(
         transformer,
-        rank=cfg.rank,
+        rank=lora_rank,
         multiplier=1.0,
         alpha=cfg.alpha,
         train_method=cfg.train_method,
         save_dir=".",
     ).to(device, dtype=dtype)
-
-    lora_sd = load_file(args.lora_path)
     # Remap ai-toolkit key format to inference_slider format if needed
     if any(k.startswith("diffusion_model.") for k in lora_sd):
         remapped = {}
@@ -216,8 +221,10 @@ def main():
             if k.endswith(".lora_down.weight"):
                 alpha_key = k.replace(".lora_down.weight", ".alpha")
                 remapped[alpha_key] = alpha_val
-        lora_sd = remapped
-    network.load_state_dict(lora_sd)
+        # filter to only keys present in the network (drops MLP keys etc.)
+        network_keys = set(network.state_dict().keys())
+        lora_sd = {k: v for k, v in remapped.items() if k in network_keys}
+    network.load_state_dict(lora_sd, strict=False)
 
     # -------------------------------------------------------------------------
     # Generate images at different slider scales
