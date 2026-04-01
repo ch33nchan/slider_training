@@ -1,0 +1,47 @@
+pretrained_model_name_or_path: "/mnt/data1/models/base-models/black-forest-labs/FLUX.1-dev"
+
+device: "cuda:3"
+max_train_steps: 2000
+sample_every: 500
+num_inference_steps: 28
+guidance_scale: 3.5
+max_sequence_length: 512
+height: 1024
+width: 1024
+
+weighting_scheme: "none"
+logit_mean: 0.0
+logit_std: 1.0
+mode_scale: 1.29
+bsz: 1
+lr: 0.001
+lr_warmup_steps: 200
+lr_num_cycles: 1
+lr_power: 1.0
+lr_scheduler: "constant"
+
+output_dir: "./outputs"
+
+# lora params
+alpha: 1
+rank: 16
+train_method: "xattn"
+num_sliders: 1
+
+# training params
+eta: 4
+
+slider_name: "gaze_sliders"
+prompt:
+  prompt1:
+    target_prompt: "a person"
+    positive_prompt: "a person looking to the right"
+    negative_prompt: "a person looking to the left"
+  prompt2:
+    target_prompt: "portrait of a person"
+    positive_prompt: "portrait of a person with eyes looking to the right"
+    negative_prompt: "portrait of a person with eyes looking to the left"
+  prompt3:
+    target_prompt: "a person looking straight ahead"
+    positive_prompt: "a person with eyes looking to the right"
+    negative_prompt: "a person with eyes looking to the left"
