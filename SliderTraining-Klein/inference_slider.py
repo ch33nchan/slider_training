@@ -195,6 +195,28 @@ def main():
     ).to(device, dtype=dtype)
 
     lora_sd = load_file(args.lora_path)
+    # Remap ai-toolkit key format to inference_slider format if needed
+    if any(k.startswith("diffusion_model.") for k in lora_sd):
+        remapped = {}
+        for k, v in lora_sd.items():
+            # strip "diffusion_model." prefix
+            k2 = k.replace("diffusion_model.", "")
+            # replace dots with underscores up to lora_A/lora_B
+            parts = k2.split(".")
+            lora_suffix = parts[-2]  # lora_A or lora_B
+            weight_suffix = parts[-1]  # weight
+            module_parts = parts[:-2]
+            module_key = "_".join(module_parts)
+            lora_dir = "lora_down" if lora_suffix == "lora_A" else "lora_up"
+            new_key = f"{module_key}.{lora_dir}.{weight_suffix}"
+            remapped[new_key] = v
+        # add alpha keys (use cfg.alpha value for all modules)
+        alpha_val = torch.tensor(float(cfg.alpha))
+        for k in list(remapped.keys()):
+            if k.endswith(".lora_down.weight"):
+                alpha_key = k.replace(".lora_down.weight", ".alpha")
+                remapped[alpha_key] = alpha_val
+        lora_sd = remapped
     network.load_state_dict(lora_sd)
 
     # -------------------------------------------------------------------------
