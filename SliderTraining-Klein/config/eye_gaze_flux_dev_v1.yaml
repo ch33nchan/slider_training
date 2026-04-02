@@ -1,0 +1,75 @@
+---
+job: extension
+config:
+  name: "eye_gaze_flux_dev_v1"
+  process:
+    - type: 'slider'
+      training_folder: "output"
+      device: cuda:2
+
+      network:
+        type: "lora"
+        linear: 16
+        linear_alpha: 16
+
+      save:
+        dtype: bf16
+        save_every: 500
+        max_step_saves_to_keep: 4
+
+      slider:
+        resolutions:
+          - [1024, 1024]
+        targets:
+          - target_class: "a person"
+            positive: "a person looking to the right"
+            negative: "a person looking to the left"
+            multiplier: 1.0
+            shuffle: false
+          - target_class: "portrait of a person"
+            positive: "portrait of a person with eyes looking to the right"
+            negative: "portrait of a person with eyes looking to the left"
+            multiplier: 1.0
+            shuffle: false
+          - target_class: "a person looking straight ahead"
+            positive: "a person with eyes looking to the right"
+            negative: "a person with eyes looking to the left"
+            multiplier: 1.0
+            shuffle: false
+
+      train:
+        batch_size: 1
+        steps: 2000
+        gradient_accumulation_steps: 1
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: "flowmatch"
+        optimizer: "adamw8bit"
+        lr: 1e-4
+        dtype: bf16
+        ema_config:
+          use_ema: true
+          ema_decay: 0.99
+
+      model:
+        name_or_path: "/mnt/data1/models/base-models/black-forest-labs/FLUX.1-dev"
+        is_flux: true
+        quantize: true
+
+      sample:
+        sampler: "flowmatch"
+        sample_every: 500
+        width: 1024
+        height: 1024
+        prompts:
+          - "a person"
+          - "a person looking to the right"
+          - "a person looking to the left"
+        seed: 42
+        guidance_scale: 3.5
+        sample_steps: 20
+
+meta:
+  name: "[name]"
+  version: '1.0'
