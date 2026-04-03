@@ -1,0 +1,20 @@
+transformer_path: "models/klein-9b/flux-2-klein-9b.safetensors"
+vae_path: "models/klein-9b/ae.safetensors"
+te_path: "Qwen/Qwen3-8B"
+device: "cuda:0"
+neg_image_dir: "data/gaze_s15/neg/"
+pos_image_dir: "data/gaze_s15/pos/"
+neutral_image_dir: "data/gaze_s15/neutral/"
+prompt: "a person"
+
+rank: 64
+alpha: 1
+train_method: "xattn"
+lr: 0.001
+eta: 8
+max_train_steps: 4000
+sample_every: 400
+height: 512
+width: 512
+
+output_dir: "outputs/gaze_horizontal_klein"
