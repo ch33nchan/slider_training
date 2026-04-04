@@ -13,6 +13,9 @@ The concept direction is defined by **image pairs** — a negative image and a p
 ## 1. Install dependencies
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
@@ -179,6 +182,57 @@ python inference_slider.py \
 | `--num_steps` | 28 | Denoising steps |
 | `--seed` | 42 | Random seed |
 | `--output` | `outputs/inference_result.png` | Output path for strip visualization |
+
+## Eye Gaze Pipeline (Texture-Preserving)
+
+To train eye-gaze sliders while avoiding LivePortrait soft-skin artifacts:
+
+1. Generate training pairs with `blend_mode=eyes_only` so only eye regions are warped.
+2. Use `mask_dir`, `eye_region_weight`, `non_eye_region_weight`, and `bg_preserve_weight`
+   in Klein configs to focus learning on eyes and preserve non-eye details.
+
+### Dataset generation
+
+```bash
+source .venv/bin/activate
+python3 generate_gaze_dataset_v2.py \
+  --input_dir ../LivePortrait/source_faces \
+  --output_dir data/gaze_horizontal_texture \
+  --num_faces 80 \
+  --size 1024 \
+  --gaze_strength 8 \
+  --blend_mode eyes_only
+
+python3 generate_gaze_dataset_vertical.py \
+  --input_dir ../LivePortrait/source_faces \
+  --output_dir data/gaze_vertical_texture \
+  --num_faces 80 \
+  --size 1024 \
+  --gaze_strength 12 \
+  --blend_mode eyes_only
+```
+
+Open-source horizontal dataset alternative:
+
+```bash
+source .venv/bin/activate
+python3 download_columbia_gaze.py
+```
+
+### Klein training (mask-aware)
+
+```bash
+source .venv/bin/activate
+python3 train_slider.py --config config/eye_gaze_horizontal_texture_v1.yaml
+python3 train_slider.py --config config/eye_gaze_vertical_texture_v1.yaml
+```
+
+### End-to-end launcher (Klein + FLUX.1-dev)
+
+```bash
+source .venv/bin/activate
+bash run_eye_gaze_pipeline.sh
+```
 
 ## VRAM Budget (~47-50 GB bf16)
 

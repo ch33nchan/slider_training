@@ -1,25 +1,31 @@
-#!/bin/bash
-# Generate vertical gaze dataset using LivePortrait.
-# Run this BEFORE run_all_training.sh
-#
-# Usage:
-#   source /mnt/data1/srini/eyegaze/slider_training/venv/bin/activate
-#   cd /mnt/data1/srini/eyegaze/slider_training/SliderTraining-Klein
-#   bash run_generate_vertical.sh
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+SOURCE_DIR="${SOURCE_DIR:-${PROJECT_ROOT}/LivePortrait/source_faces}"
+OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/data/gaze_vertical_texture}"
+NUM_FACES="${NUM_FACES:-80}"
+SIZE="${SIZE:-1024}"
+GAZE_STRENGTH="${GAZE_STRENGTH:-12}"
+GPU_ID="${GPU_ID:-0}"
 
-VENV=/mnt/data1/srini/eyegaze/slider_training/venv/bin/activate
-source $VENV
+if [[ -n "${VENV_PATH:-}" ]]; then
+  # shellcheck disable=SC1090
+  source "${VENV_PATH}/bin/activate"
+fi
 
-cd /mnt/data1/srini/eyegaze/slider_training/SliderTraining-Klein
+cd "${SCRIPT_DIR}"
 
-echo "=== Generating vertical gaze dataset (strength=15, size=512) ==="
-CUDA_VISIBLE_DEVICES=3 python generate_gaze_dataset_vertical.py \
-  --input_dir ../LivePortrait/source_faces \
-  --output_dir data/gaze_vertical_s15 \
-  --gaze_strength 15 \
-  --size 512 \
-  --device_id 3
+echo "=== Generating vertical gaze dataset with eye-only blending ==="
+CUDA_VISIBLE_DEVICES="${GPU_ID}" "${PYTHON_BIN}" generate_gaze_dataset_vertical.py \
+  --input_dir "${SOURCE_DIR}" \
+  --output_dir "${OUTPUT_DIR}" \
+  --num_faces "${NUM_FACES}" \
+  --gaze_strength "${GAZE_STRENGTH}" \
+  --size "${SIZE}" \
+  --device_id 0 \
+  --blend_mode eyes_only
 
-echo "=== Done! Vertical gaze dataset at data/gaze_vertical_s15/ ==="
+echo "=== Done: ${OUTPUT_DIR} ==="

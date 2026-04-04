@@ -37,6 +37,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn.functional as F
 from omegaconf import OmegaConf
 from PIL import Image
 from safetensors.torch import load_file
@@ -58,6 +59,7 @@ from utils.lora import LoRANetwork
 
 @dataclass
 class ImagePair:
+    stem: str
     neg_path: str
     pos_path: str
     neutral_path: str = None
@@ -117,6 +119,7 @@ def load_image_pairs(neg_dir: str, pos_dir: str, neutral_dir: str = None):
     common_stems = sorted(set(neg_files.keys()) & set(pos_files.keys()))
     pairs = [
         ImagePair(
+            stem=s,
             neg_path=neg_files[s],
             pos_path=pos_files[s],
             neutral_path=neutral_files.get(s),
@@ -131,6 +134,62 @@ def load_and_preprocess_image(img_path: str, height: int, width: int):
     img = Image.open(img_path).convert("RGB").resize((width, height))
     tensor = transforms.ToTensor()(img) * 2 - 1
     return tensor, img
+
+
+def load_mask_cache(mask_dir: str, height: int, width: int):
+    """Load grayscale masks from directory; keys are filename stems."""
+    if not mask_dir:
+        return {}
+
+    mask_path = Path(mask_dir)
+    if not mask_path.exists():
+        return {}
+
+    exts = {".png", ".jpg", ".jpeg", ".webp"}
+    cache = {}
+    for file in sorted(mask_path.iterdir()):
+        if file.suffix.lower() not in exts:
+            continue
+        mask_img = Image.open(file).convert("L").resize((width, height), Image.LANCZOS)
+        mask_tensor = transforms.ToTensor()(mask_img)  # [1, H, W], [0, 1]
+        cache[file.stem] = mask_tensor
+    return cache
+
+
+def build_token_weights(
+    mask_tensor: torch.Tensor | None,
+    latent_h: int,
+    latent_w: int,
+    eye_weight: float,
+    non_eye_weight: float,
+    device: str,
+):
+    if mask_tensor is None:
+        return None, None
+
+    mask = mask_tensor.unsqueeze(0).to(device=device, dtype=torch.float32)  # [1, 1, H, W]
+    mask_latent = F.interpolate(
+        mask,
+        size=(latent_h, latent_w),
+        mode="bilinear",
+        align_corners=False,
+    ).clamp_(0.0, 1.0)
+    mask_tokens = mask_latent.permute(0, 2, 3, 1).reshape(1, -1, 1)
+
+    token_weights = non_eye_weight + (eye_weight - non_eye_weight) * mask_tokens
+    bg_tokens = 1.0 - mask_tokens
+    return token_weights, bg_tokens
+
+
+def weighted_token_mse(pred: torch.Tensor, target: torch.Tensor, token_weights: torch.Tensor | None):
+    diff = (pred.float() - target.float()) ** 2
+    if token_weights is None:
+        return diff.mean()
+
+    weights = token_weights.to(device=diff.device, dtype=diff.dtype)
+    weighted_diff = diff * weights
+    denom = (weights.sum() * diff.shape[-1]).clamp_min(1e-6)
+    return weighted_diff.sum() / denom
 
 
 @torch.no_grad()
@@ -283,6 +342,12 @@ def main():
         f"No matching image pairs found in {cfg.neg_image_dir} and {cfg.pos_image_dir}"
     )
 
+    mask_cache = {}
+    mask_dir = cfg.get("mask_dir", None)
+    if mask_dir:
+        mask_cache = load_mask_cache(mask_dir, cfg.height, cfg.width)
+        print(f"Loaded {len(mask_cache)} masks from {mask_dir}")
+
     # Keep one neg image for periodic sampling visualization
     _, sample_img_pil = load_and_preprocess_image(pairs[0].neg_path, cfg.height, cfg.width)
 
@@ -322,6 +387,14 @@ def main():
     bidirectional = cfg.get("bidirectional", False)
     if bidirectional:
         print("  [bidirectional=True] Training both +scale and -scale directions per step.")
+    eye_region_weight = float(cfg.get("eye_region_weight", 1.0))
+    non_eye_region_weight = float(cfg.get("non_eye_region_weight", 1.0))
+    bg_preserve_weight = float(cfg.get("bg_preserve_weight", 0.0))
+    if mask_dir:
+        print(
+            f"  [mask weighting] eye_region_weight={eye_region_weight}, "
+            f"non_eye_region_weight={non_eye_region_weight}, bg_preserve_weight={bg_preserve_weight}"
+        )
 
     losses = []
     scales = (-5, -2.5, 0, 2.5, 5)
@@ -370,6 +443,14 @@ def main():
 
         # Pack x_t to tokens
         packed_x_t, x_ids = batched_prc_img(x_t)
+        token_weights, bg_tokens = build_token_weights(
+            mask_cache.get(pair.stem),
+            latent_h=src_latent.shape[-2],
+            latent_w=src_latent.shape[-1],
+            eye_weight=eye_region_weight,
+            non_eye_weight=non_eye_region_weight,
+            device=device,
+        )
 
         t_vec = torch.full((1,), t.item(), device=device, dtype=dtype)
 
@@ -430,13 +511,21 @@ def main():
 
             network.set_lora_slider(1.0)  # reset to default
 
-            loss_fwd = torch.mean(
-                ((lora_pred_fwd.float() - gt_fwd.float()) ** 2).reshape(gt_fwd.shape[0], -1), 1
-            ).mean()
-            loss_bwd = torch.mean(
-                ((lora_pred_bwd.float() - gt_bwd.float()) ** 2).reshape(gt_bwd.shape[0], -1), 1
-            ).mean()
+            loss_fwd = weighted_token_mse(lora_pred_fwd, gt_fwd, token_weights)
+            loss_bwd = weighted_token_mse(lora_pred_bwd, gt_bwd, token_weights)
             loss = 0.5 * (loss_fwd + loss_bwd)
+
+            if bg_preserve_weight > 0 and bg_tokens is not None:
+                with torch.no_grad():
+                    src_pred_base = transformer(
+                        x=x_src, x_ids=x_src_ids, timesteps=t_vec,
+                        ctx=neutral_txt, ctx_ids=neutral_txt_ids,
+                        guidance=None,
+                    )
+                    src_pred_base = src_pred_base[:, :packed_x_t.shape[1]]
+                bg_loss_fwd = weighted_token_mse(lora_pred_fwd, src_pred_base, bg_tokens)
+                bg_loss_bwd = weighted_token_mse(lora_pred_bwd, src_pred_base, bg_tokens)
+                loss = loss + bg_preserve_weight * 0.5 * (bg_loss_fwd + bg_loss_bwd)
         else:
             # ----- One forward pass WITH LoRA (using source ref as baseline) -----
             with ExitStack() as stack:
@@ -448,10 +537,18 @@ def main():
                 )
                 lora_pred = lora_pred[:, :packed_x_t.shape[1]]
 
-            # MSE loss
-            loss = torch.mean(
-                ((lora_pred.float() - gt_fwd.float()) ** 2).reshape(gt_fwd.shape[0], -1), 1
-            ).mean()
+            loss = weighted_token_mse(lora_pred, gt_fwd, token_weights)
+
+            if bg_preserve_weight > 0 and bg_tokens is not None:
+                with torch.no_grad():
+                    src_pred_base = transformer(
+                        x=x_src, x_ids=x_src_ids, timesteps=t_vec,
+                        ctx=neutral_txt, ctx_ids=neutral_txt_ids,
+                        guidance=None,
+                    )
+                    src_pred_base = src_pred_base[:, :packed_x_t.shape[1]]
+                bg_loss = weighted_token_mse(lora_pred, src_pred_base, bg_tokens)
+                loss = loss + bg_preserve_weight * bg_loss
 
         loss.backward()
         optimizer.step()
