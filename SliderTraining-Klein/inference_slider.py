@@ -164,6 +164,71 @@ def resolve_sizes(image_path: str, requested_size: int) -> tuple[tuple[int, int]
     return (final_width, final_height), (model_width, model_height)
 
 
+def resolve_model_size(width: int, height: int) -> tuple[int, int]:
+    model_width = max(16, (width // 16) * 16)
+    model_height = max(16, (height // 16) * 16)
+    return model_width, model_height
+
+
+def mask_bbox(mask: np.ndarray, threshold: float = 0.08) -> tuple[int, int, int, int]:
+    ys, xs = np.where(mask > threshold)
+    if len(xs) == 0 or len(ys) == 0:
+        h, w = mask.shape[:2]
+        return 0, 0, w, h
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    return x0, y0, x1, y1
+
+
+def expand_bbox(
+    bbox: tuple[int, int, int, int],
+    image_width: int,
+    image_height: int,
+    padding: float,
+) -> tuple[int, int, int, int]:
+    x0, y0, x1, y1 = bbox
+    bw = x1 - x0
+    bh = y1 - y0
+    cx = 0.5 * (x0 + x1)
+    cy = 0.5 * (y0 + y1)
+    new_w = max(64, int(round(bw * padding)))
+    new_h = max(64, int(round(bh * padding)))
+    nx0 = max(0, int(round(cx - new_w / 2)))
+    ny0 = max(0, int(round(cy - new_h / 2)))
+    nx1 = min(image_width, nx0 + new_w)
+    ny1 = min(image_height, ny0 + new_h)
+    nx0 = max(0, nx1 - new_w)
+    ny0 = max(0, ny1 - new_h)
+    return nx0, ny0, nx1, ny1
+
+
+def feather_mask(height: int, width: int, feather_ratio: float) -> np.ndarray:
+    yy, xx = np.mgrid[0:height, 0:width]
+    dx = np.minimum(xx, width - 1 - xx).astype(np.float32)
+    dy = np.minimum(yy, height - 1 - yy).astype(np.float32)
+    d = np.minimum(dx, dy)
+    feather = max(1.0, feather_ratio * float(min(width, height)))
+    alpha = np.clip(d / feather, 0.0, 1.0)
+    alpha = alpha * alpha * (3.0 - 2.0 * alpha)
+    return alpha.astype(np.float32)
+
+
+def paste_crop(
+    base_rgb: np.ndarray,
+    crop_rgb: np.ndarray,
+    bbox: tuple[int, int, int, int],
+    alpha_mask: np.ndarray,
+) -> np.ndarray:
+    x0, y0, x1, y1 = bbox
+    out = base_rgb.copy()
+    base_crop = out[y0:y1, x0:x1].astype(np.float32)
+    crop_f = crop_rgb.astype(np.float32)
+    alpha = alpha_mask[..., None].astype(np.float32)
+    blended = base_crop * (1.0 - alpha) + crop_f * alpha
+    out[y0:y1, x0:x1] = np.clip(blended + 0.5, 0, 255).astype(np.uint8)
+    return out
+
+
 def load_transformer(path: str, device: str, dtype=torch.bfloat16):
     """Load Klein 9B transformer from safetensors."""
     params = Klein9BParams()
@@ -285,6 +350,14 @@ def main():
     parser.add_argument("--save_eye_mask", action="store_true")
     parser.add_argument("--size", type=int, default=0,
                         help="Square output size. Use 0 to preserve exact input resolution in final saves.")
+    parser.add_argument("--crop_mode", type=str, default="none", choices=["none", "eyes"],
+                        help="Run LoRA on the full image or only an eye-centered crop.")
+    parser.add_argument("--crop_padding", type=float, default=4.0,
+                        help="Expansion factor around the detected eye box when crop_mode=eyes.")
+    parser.add_argument("--crop_threshold", type=float, default=0.08,
+                        help="Mask threshold for deriving the eye crop.")
+    parser.add_argument("--crop_feather", type=float, default=0.18,
+                        help="Edge feather ratio when pasting crop edits back into the full image.")
     parser.add_argument("--left_scale", type=float, default=None,
                         help="Optional explicit left output scale. If set with right_scale, also saves left_full/right_full.")
     parser.add_argument("--right_scale", type=float, default=None,
@@ -295,9 +368,8 @@ def main():
     cfg = OmegaConf.load(args.config)
     device = cfg.device
     dtype = torch.bfloat16
-    final_size, model_size = resolve_sizes(args.source_image, args.size)
+    final_size, _ = resolve_sizes(args.source_image, args.size)
     final_width, final_height = final_size
-    model_width, model_height = model_size
 
     # -------------------------------------------------------------------------
     # Load models
@@ -323,8 +395,32 @@ def main():
     # -------------------------------------------------------------------------
     print("Encoding reference image...")
     source_full = Image.open(args.source_image).convert("RGB").resize(final_size, Image.LANCZOS)
-    source_img = source_full.resize(model_size, Image.LANCZOS)
-    source_rgb = np.array(source_full)
+    source_rgb_full = np.array(source_full)
+    eye_mask_full = build_eye_mask(
+        source_rgb_full,
+        eye_mask_scale=args.eye_mask_scale,
+        eye_mask_blur=args.eye_mask_blur,
+    )
+
+    crop_bbox = None
+    if args.crop_mode == "eyes":
+        raw_bbox = mask_bbox(eye_mask_full, threshold=args.crop_threshold)
+        crop_bbox = expand_bbox(raw_bbox, final_width, final_height, args.crop_padding)
+        x0, y0, x1, y1 = crop_bbox
+        work_source = source_full.crop((x0, y0, x1, y1))
+        work_mask = eye_mask_full[y0:y1, x0:x1]
+        crop_alpha = feather_mask(y1 - y0, x1 - x0, args.crop_feather)
+    else:
+        work_source = source_full
+        work_mask = eye_mask_full
+        crop_alpha = None
+
+    work_width, work_height = work_source.size
+    model_width, model_height = resolve_model_size(work_width, work_height)
+    model_size = (model_width, model_height)
+
+    source_img = work_source.resize(model_size, Image.LANCZOS)
+    work_source_rgb = np.array(work_source)
     ref_tokens, ref_ids = encode_image_refs(vae, [source_img], limit_pixels=model_width * model_height)
     ref_tokens = ref_tokens.to(device, dtype=dtype)
     ref_ids = ref_ids.to(device)
@@ -337,14 +433,8 @@ def main():
         source_latent = vae.encode(source_tensor.unsqueeze(0).to(device, dtype=dtype))[0]
     packed_source, _ = batched_prc_img(source_latent.unsqueeze(0))
 
-    eye_mask = None
     max_abs_scale = max([abs(s) for s in args.scales]) if args.scales else 1.0
-    if args.eye_blend_mode != "none":
-        eye_mask = build_eye_mask(
-            source_rgb,
-            eye_mask_scale=args.eye_mask_scale,
-            eye_mask_blur=args.eye_mask_blur,
-        )
+    eye_mask = work_mask if args.eye_blend_mode != "none" else None
 
     # -------------------------------------------------------------------------
     # Create LoRA network and load weights
@@ -439,7 +529,7 @@ def main():
         )
 
         # Decode to PIL
-        raw_output_pil = latent_to_pil(vae, packed_output, noise_ids, dtype).resize(final_size, Image.LANCZOS)
+        raw_output_pil = latent_to_pil(vae, packed_output, noise_ids, dtype).resize((work_width, work_height), Image.LANCZOS)
         raw_slider_images.append(raw_output_pil)
         slider_images.append(raw_output_pil)
 
@@ -461,7 +551,7 @@ def main():
 
             if args.eye_edit_mode == "delta" and baseline_rgb is not None:
                 edited = apply_eye_delta(
-                    source_rgb=source_rgb,
+                    source_rgb=work_source_rgb,
                     baseline_rgb=baseline_rgb,
                     target_rgb=np.array(raw_slider_images[idx]),
                     eye_mask=eye_mask,
@@ -470,12 +560,32 @@ def main():
                 )
             else:
                 edited = blend_eyes_only(
-                    source_rgb,
+                    work_source_rgb,
                     np.array(raw_slider_images[idx]),
                     eye_mask,
                     blend_strength,
                 )
-            output_pil = Image.fromarray(edited)
+            if args.crop_mode == "eyes" and crop_bbox is not None and crop_alpha is not None:
+                pasted = paste_crop(
+                    base_rgb=source_rgb_full,
+                    crop_rgb=edited,
+                    bbox=crop_bbox,
+                    alpha_mask=crop_alpha,
+                )
+                output_pil = Image.fromarray(pasted)
+            else:
+                output_pil = Image.fromarray(edited)
+        else:
+            if args.crop_mode == "eyes" and crop_bbox is not None and crop_alpha is not None:
+                pasted = paste_crop(
+                    base_rgb=source_rgb_full,
+                    crop_rgb=np.array(raw_slider_images[idx]),
+                    bbox=crop_bbox,
+                    alpha_mask=crop_alpha,
+                )
+                output_pil = Image.fromarray(pasted)
+            else:
+                output_pil = raw_slider_images[idx]
 
         slider_images[idx] = output_pil
 
@@ -507,7 +617,8 @@ def main():
 
     if eye_mask is not None and args.save_eye_mask:
         mask_path = output_path.parent / "eye_mask.png"
-        mask_u8 = np.clip(eye_mask * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        mask_to_save = eye_mask_full if args.crop_mode == "eyes" else eye_mask
+        mask_u8 = np.clip(mask_to_save * 255.0 + 0.5, 0, 255).astype(np.uint8)
         Image.fromarray(mask_u8, mode="L").save(str(mask_path))
         print(f"  Saved {mask_path}")
 

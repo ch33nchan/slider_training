@@ -28,6 +28,10 @@ EYE_BLEND_MODE="${EYE_BLEND_MODE:-adaptive}"
 EYE_BLEND_STRENGTH="${EYE_BLEND_STRENGTH:-0.72}"
 EYE_EDIT_MODE="${EYE_EDIT_MODE:-delta}"
 DELTA_GAIN="${DELTA_GAIN:-2.4}"
+CROP_MODE="${CROP_MODE:-eyes}"
+CROP_PADDING="${CROP_PADDING:-4.0}"
+CROP_THRESHOLD="${CROP_THRESHOLD:-0.08}"
+CROP_FEATHER="${CROP_FEATHER:-0.18}"
 
 if [ ! -d "${INPUT_DIR}" ]; then
     echo "Missing input directory: ${INPUT_DIR}" >&2
@@ -77,6 +81,10 @@ for FACE in "${FACES[@]}"; do
             --eye_blend_strength "${EYE_BLEND_STRENGTH}" \
             --eye_edit_mode "${EYE_EDIT_MODE}" \
             --delta_gain "${DELTA_GAIN}" \
+            --crop_mode "${CROP_MODE}" \
+            --crop_padding "${CROP_PADDING}" \
+            --crop_threshold "${CROP_THRESHOLD}" \
+            --crop_feather "${CROP_FEATHER}" \
             --keep_source_at_zero \
             --save_eye_mask \
             --seed "${SEED}" \
