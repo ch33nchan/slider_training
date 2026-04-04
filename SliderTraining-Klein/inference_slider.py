@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from omegaconf import OmegaConf
-from PIL import Image
+from PIL import Image, ImageFilter
 from safetensors.torch import load_file
 from tqdm import tqdm
 
@@ -39,6 +39,98 @@ from models.sampling import (
 )
 from utils.text_encoder import load_text_encoder, encode_prompt
 from utils.lora import LoRANetwork
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
+
+def _largest_box(boxes):
+    if len(boxes) == 0:
+        return None
+    return max(boxes, key=lambda b: int(b[2]) * int(b[3]))
+
+
+def build_eye_mask(
+    source_rgb: np.ndarray,
+    eye_mask_scale: float = 1.8,
+    eye_mask_blur: int = 31,
+) -> np.ndarray:
+    h, w = source_rgb.shape[:2]
+    eye_boxes = []
+    if cv2 is not None:
+        gray = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY)
+        face_detector = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+        eye_detector = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
+
+        faces = face_detector.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=5,
+            minSize=(max(48, w // 8), max(48, h // 8)),
+        )
+        face = _largest_box(faces)
+        if face is not None:
+            fx, fy, fw, fh = map(int, face)
+            roi_y_end = fy + int(fh * 0.65)
+            roi = gray[fy:roi_y_end, fx:fx + fw]
+            detected = eye_detector.detectMultiScale(
+                roi,
+                scaleFactor=1.1,
+                minNeighbors=5,
+                minSize=(max(12, fw // 12), max(12, fh // 12)),
+            )
+            for ex, ey, ew, eh in detected:
+                eye_boxes.append((fx + int(ex), fy + int(ey), int(ew), int(eh)))
+
+    if len(eye_boxes) >= 2:
+        eye_boxes = sorted(
+            eye_boxes,
+            key=lambda b: int(b[2]) * int(b[3]),
+            reverse=True,
+        )[:4]
+        eye_boxes = sorted(eye_boxes, key=lambda b: b[0])[:2]
+    else:
+        cx = w // 2
+        cy = int(h * 0.38)
+        rx = int(w * 0.09)
+        ry = int(h * 0.05)
+        offset = int(w * 0.13)
+        eye_boxes = [
+            (cx - offset - rx, cy - ry, 2 * rx, 2 * ry),
+            (cx + offset - rx, cy - ry, 2 * rx, 2 * ry),
+        ]
+
+    yy, xx = np.mgrid[0:h, 0:w]
+    mask = np.zeros((h, w), dtype=np.float32)
+    for ex, ey, ew, eh in eye_boxes:
+        cx = float(ex + ew * 0.5)
+        cy = float(ey + eh * 0.5)
+        rx = float(max(8, int(ew * 0.5 * eye_mask_scale)))
+        ry = float(max(6, int(eh * 0.6 * eye_mask_scale)))
+        ellipse = (((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2) <= 1.0
+        mask[ellipse] = 1.0
+
+    blur_radius = max(0.1, float(eye_mask_blur) / 6.0)
+    mask_img = Image.fromarray((mask * 255.0).astype(np.uint8), mode="L")
+    mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    return np.array(mask_img, dtype=np.float32) / 255.0
+
+
+def blend_eyes_only(
+    source_rgb: np.ndarray,
+    edited_rgb: np.ndarray,
+    eye_mask: np.ndarray,
+    blend_strength: float,
+) -> np.ndarray:
+    alpha = np.clip(eye_mask * float(blend_strength), 0.0, 1.0)[..., None].astype(np.float32)
+    source_f = source_rgb.astype(np.float32)
+    edited_f = edited_rgb.astype(np.float32)
+    blended = source_f * (1.0 - alpha) + edited_f * alpha
+    return np.clip(blended + 0.5, 0, 255).astype(np.uint8)
 
 
 def load_transformer(path: str, device: str, dtype=torch.bfloat16):
@@ -70,6 +162,7 @@ def denoise_img2img(
     transformer,
     network,
     packed_noise,
+    packed_source,
     noise_ids,
     txt,
     txt_ids,
@@ -78,6 +171,7 @@ def denoise_img2img(
     ref_ids,
     device,
     dtype,
+    source_lock,
 ):
     """
     Denoise from noise with reference image conditioning and LoRA.
@@ -110,6 +204,8 @@ def denoise_img2img(
             )
         pred = pred[:, : img.shape[1]]
         img = img + (t_prev - t_curr) * pred
+        if source_lock > 0:
+            img = (1.0 - source_lock) * img + source_lock * packed_source
 
     return img
 
@@ -135,8 +231,23 @@ def main():
     )
     parser.add_argument("--num_steps", type=int, default=28)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--strength", type=float, default=0.3,
+    parser.add_argument("--strength", type=float, default=0.25,
                         help="img2img strength 0-1: 0=no change, 1=full regen from noise")
+    parser.add_argument("--scale_multiplier", type=float, default=1.8,
+                        help="Multiply each requested slider scale by this factor for stronger gaze edits.")
+    parser.add_argument("--flip_direction", action="store_true",
+                        help="Flip sign of slider scales if learned direction is reversed.")
+    parser.add_argument("--source_lock", type=float, default=0.06,
+                        help="Per-step latent pull toward source (0-0.2 recommended) to preserve identity.")
+    parser.add_argument("--eye_blend_mode", type=str, default="adaptive", choices=["none", "fixed", "adaptive"],
+                        help="Blend generated eyes onto original source to preserve face identity.")
+    parser.add_argument("--eye_blend_strength", type=float, default=0.9,
+                        help="Base blend strength for eye-only compositing.")
+    parser.add_argument("--eye_mask_scale", type=float, default=1.8)
+    parser.add_argument("--eye_mask_blur", type=int, default=31)
+    parser.add_argument("--keep_source_at_zero", action="store_true",
+                        help="Use exact source image for scale=0 output.")
+    parser.add_argument("--save_eye_mask", action="store_true")
     parser.add_argument("--output", type=str, default="outputs/inference_result.png")
     args = parser.parse_args()
 
@@ -170,6 +281,7 @@ def main():
     source_img = Image.open(args.source_image).convert("RGB").resize(
         (cfg.width, cfg.height)
     )
+    source_rgb = np.array(source_img)
     ref_tokens, ref_ids = encode_image_refs(vae, [source_img])
     ref_tokens = ref_tokens.to(device, dtype=dtype)
     ref_ids = ref_ids.to(device)
@@ -181,6 +293,15 @@ def main():
     with torch.no_grad():
         source_latent = vae.encode(source_tensor.unsqueeze(0).to(device, dtype=dtype))[0]
     packed_source, _ = batched_prc_img(source_latent.unsqueeze(0))
+
+    eye_mask = None
+    max_abs_scale = max([abs(s) for s in args.scales]) if args.scales else 1.0
+    if args.eye_blend_mode != "none":
+        eye_mask = build_eye_mask(
+            source_rgb,
+            eye_mask_scale=args.eye_mask_scale,
+            eye_mask_blur=args.eye_mask_blur,
+        )
 
     # -------------------------------------------------------------------------
     # Create LoRA network and load weights
@@ -238,7 +359,10 @@ def main():
 
     for scale in args.scales:
         print(f"\nScale: {scale}")
-        network.set_lora_slider(scale)
+        effective_scale = scale * args.scale_multiplier
+        if args.flip_direction:
+            effective_scale = -effective_scale
+        network.set_lora_slider(effective_scale)
 
         generator = torch.Generator(device=device).manual_seed(args.seed)
         noise = torch.randn(
@@ -263,15 +387,28 @@ def main():
         # Denoise with reference conditioning + LoRA
         packed_output = denoise_img2img(
             transformer, network,
-            packed_start, noise_ids,
+            packed_start, packed_source, noise_ids,
             txt, txt_ids,
             timesteps_use,
             ref_tokens, ref_ids,
-            device, dtype,
+            device, dtype, args.source_lock,
         )
 
         # Decode to PIL
         output_pil = latent_to_pil(vae, packed_output, noise_ids, dtype)
+
+        if args.keep_source_at_zero and abs(scale) < 1e-8:
+            output_pil = source_img.copy()
+        elif eye_mask is not None:
+            if args.eye_blend_mode == "fixed":
+                blend_strength = float(args.eye_blend_strength)
+            else:
+                scale_ratio = abs(scale) / max(max_abs_scale, 1e-6)
+                blend_strength = float(args.eye_blend_strength) * (0.45 + 0.55 * scale_ratio)
+            blend_strength = max(0.0, min(1.0, blend_strength))
+            blended = blend_eyes_only(source_rgb, np.array(output_pil), eye_mask, blend_strength)
+            output_pil = Image.fromarray(blended)
+
         slider_images.append(output_pil)
 
     # -------------------------------------------------------------------------
@@ -299,6 +436,12 @@ def main():
     plt.savefig(str(output_path), dpi=150, bbox_inches="tight")
     plt.close()
     print(f"\nSaved visualization to {output_path}")
+
+    if eye_mask is not None and args.save_eye_mask:
+        mask_path = output_path.parent / "eye_mask.png"
+        mask_u8 = np.clip(eye_mask * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        Image.fromarray(mask_u8, mode="L").save(str(mask_path))
+        print(f"  Saved {mask_path}")
 
     # Save individual images
     for img, scale in zip(slider_images, args.scales):
