@@ -145,7 +145,30 @@ def apply_eye_delta(
     source_f = source_rgb.astype(np.float32)
     baseline_f = baseline_rgb.astype(np.float32)
     target_f = target_rgb.astype(np.float32)
-    delta = (target_f - baseline_f) * float(delta_gain)
+    delta = target_f - baseline_f
+    if cv2 is not None:
+        sigma = max(2.0, 0.04 * float(min(delta.shape[0], delta.shape[1])))
+        low_freq = cv2.GaussianBlur(
+            delta,
+            ksize=(0, 0),
+            sigmaX=sigma,
+            sigmaY=sigma,
+            borderType=cv2.BORDER_REFLECT,
+        )
+        delta = delta - low_freq
+
+    mask = np.clip(eye_mask.astype(np.float32), 0.0, 1.0)
+    mask_sum = float(mask.sum())
+    if mask_sum > 1e-6:
+        masked_mean = (delta * mask[..., None]).sum(axis=(0, 1)) / mask_sum
+        delta = delta - masked_mean
+        masked_delta = delta[mask > 0.05]
+        if masked_delta.size > 0:
+            clip_value = float(np.quantile(np.abs(masked_delta), 0.98))
+            clip_value = max(18.0, min(48.0, clip_value * 1.25))
+            delta = np.clip(delta, -clip_value, clip_value)
+
+    delta = delta * float(delta_gain)
     edited = source_f + alpha * delta
     return np.clip(edited + 0.5, 0, 255).astype(np.uint8)
 
