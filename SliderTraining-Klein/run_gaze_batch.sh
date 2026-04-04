@@ -7,7 +7,7 @@ cd "${SCRIPT_DIR}"
 
 INPUT_DIR="${INPUT_DIR:-${REPO_ROOT}/characters}"
 MODE="${MODE:-PURE_LORA}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/pipeline_lora_gaze_characters}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/character_lora}"
 CONFIG="${CONFIG:-config/eye_gaze_horizontal_texture_v1.yaml}"
 LORA_PATH="${LORA_PATH:-$(ls -1 outputs/gaze_horizontal_klein_texture/weights/slider_*.safetensors 2>/dev/null | sort | tail -n 1)}"
 GPU_ID="${GPU_ID:-0}"
