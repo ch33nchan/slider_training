@@ -16,6 +16,22 @@ import cv2
 from PIL import Image, ImageDraw
 import numpy as np
 
+
+def resolve_output_size(image_path: str, requested_size: int) -> tuple[int, int]:
+    src = Image.open(image_path).convert("RGB")
+    if requested_size <= 0:
+        return src.size
+    return requested_size, requested_size
+
+
+def save_rgb_image(rgb_image: np.ndarray, output_path: str, size: tuple[int, int]) -> Image.Image:
+    if tuple(rgb_image.shape[1::-1]) != size:
+        rgb_image = cv2.resize(rgb_image, size, interpolation=cv2.INTER_LANCZOS4)
+    image = Image.fromarray(rgb_image)
+    image.save(output_path)
+    return image
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_image", required=True)
@@ -26,11 +42,19 @@ def main():
                         help="Max eyeball_direction_x value (positive=right, negative=left)")
     parser.add_argument("--steps", type=int, default=7,
                         help="Number of steps across the gaze range")
-    parser.add_argument("--size", type=int, default=512)
+    parser.add_argument("--size", type=int, default=0,
+                        help="Square output size. Use 0 to keep original full resolution.")
+    parser.add_argument("--left_gaze", type=float, default=-18.0,
+                        help="Explicit left gaze output.")
+    parser.add_argument("--right_gaze", type=float, default=18.0,
+                        help="Explicit right gaze output.")
+    parser.add_argument("--preview_size", type=int, default=512,
+                        help="Preview tile size for strip.png.")
     parser.add_argument("--device_id", type=int, default=0)
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+    output_w, output_h = resolve_output_size(args.input_image, args.size)
 
     sys.path.insert(0, args.liveportrait_dir)
     from src.config.argument_config import ArgumentConfig
@@ -51,10 +75,10 @@ def main():
     pipeline = GradioPipeline(inference_cfg, crop_cfg, lp_args)
 
     # Gaze values: evenly spaced from -max to +max
-    import numpy as np
     gaze_values = np.linspace(-args.max_gaze, args.max_gaze, args.steps).tolist()
 
     print(f"Processing {len(gaze_values)} gaze directions: {[f'{g:+.1f}' for g in gaze_values]}")
+    print(f"Output size: {output_w}x{output_h}")
 
     input_path = args.input_image
     eye_ratio, lip_ratio = pipeline.init_retargeting_image(
@@ -90,22 +114,56 @@ def main():
             flag_stitching_retargeting_input=True,
             flag_do_crop_input_retargeting_image=True,
         )
-        out_rgb = cv2.resize(
-            cv2.cvtColor(out_blended, cv2.COLOR_RGB2BGR),
-            (args.size, args.size), interpolation=cv2.INTER_LANCZOS4
-        )
+        out_rgb = np.asarray(out_blended, dtype=np.uint8)
         fname = os.path.join(args.output_dir, f"gaze_{gaze_x:+.1f}.png")
-        cv2.imwrite(fname, out_rgb)
-        frames.append(Image.fromarray(cv2.cvtColor(out_rgb, cv2.COLOR_BGR2RGB)))
+        frames.append(save_rgb_image(out_rgb, fname, (output_w, output_h)))
         print(f" -> saved", flush=True)
 
+    explicit_outputs = [
+        ("left_full.png", args.left_gaze),
+        ("right_full.png", args.right_gaze),
+    ]
+    for filename, gaze_x in explicit_outputs:
+        print(f"  explicit {filename}: gaze_x={gaze_x:+.1f}", end="", flush=True)
+        _, out_blended = pipeline.execute_image_retargeting(
+            input_eye_ratio=eye_ratio,
+            input_lip_ratio=lip_ratio,
+            input_head_pitch_variation=0.0,
+            input_head_yaw_variation=0.0,
+            input_head_roll_variation=0.0,
+            mov_x=0.0,
+            mov_y=0.0,
+            mov_z=1.0,
+            lip_variation_zero=0.0,
+            lip_variation_one=0.0,
+            lip_variation_two=0.0,
+            lip_variation_three=0.0,
+            smile=0.0,
+            wink=0.0,
+            eyebrow=0.0,
+            eyeball_direction_x=float(gaze_x),
+            eyeball_direction_y=0.0,
+            input_image=input_path,
+            retargeting_source_scale=2.3,
+            flag_stitching_retargeting_input=True,
+            flag_do_crop_input_retargeting_image=True,
+        )
+        save_rgb_image(
+            np.asarray(out_blended, dtype=np.uint8),
+            os.path.join(args.output_dir, filename),
+            (output_w, output_h),
+        )
+        print(" -> saved", flush=True)
+
     # Load input for strip
-    input_img = Image.open(input_path).convert("RGB").resize((args.size, args.size))
+    input_img = Image.open(input_path).convert("RGB")
+    strip_input = input_img.resize((args.preview_size, args.preview_size), Image.LANCZOS)
 
     # Build strip: INPUT + all gaze frames
-    all_frames = [input_img] + frames
+    strip_frames = [frame.resize((args.preview_size, args.preview_size), Image.LANCZOS) for frame in frames]
+    all_frames = [strip_input] + strip_frames
     label_h = 40
-    w, h = args.size, args.size
+    w, h = args.preview_size, args.preview_size
     strip = Image.new("RGB", (w * len(all_frames), h + label_h), (255, 255, 255))
     draw = ImageDraw.Draw(strip)
 
@@ -117,6 +175,9 @@ def main():
     strip_path = os.path.join(args.output_dir, "strip.png")
     strip.save(strip_path)
     print(f"\nStrip saved: {strip_path}")
+    print(f"Full-resolution outputs:")
+    print(f"  {os.path.join(args.output_dir, 'left_full.png')}")
+    print(f"  {os.path.join(args.output_dir, 'right_full.png')}")
     print(f"Done! Results in {args.output_dir}/")
 
 
