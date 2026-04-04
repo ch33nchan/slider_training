@@ -15,6 +15,10 @@ cd "${SCRIPT_DIR}"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 SOURCE_DIR="${SOURCE_DIR:-${PROJECT_ROOT}/LivePortrait/source_faces}"
+KLEIN_CFG_H="${KLEIN_CFG_H:-${SCRIPT_DIR}/config/eye_gaze_horizontal_texture_v1.yaml}"
+KLEIN_CFG_V="${KLEIN_CFG_V:-${SCRIPT_DIR}/config/eye_gaze_vertical_texture_v1.yaml}"
+FLUX_CFG_H="${FLUX_CFG_H:-config/gaze_horizontal_flux.yaml}"
+FLUX_CFG_V="${FLUX_CFG_V:-config/gaze_vertical_flux.yaml}"
 
 H_DATASET_OUT="${H_DATASET_OUT:-${SCRIPT_DIR}/data/gaze_horizontal_texture}"
 V_DATASET_OUT="${V_DATASET_OUT:-${SCRIPT_DIR}/data/gaze_vertical_texture}"
@@ -56,13 +60,13 @@ CUDA_VISIBLE_DEVICES="${GPU_DATA_V}" "${PYTHON_BIN}" "${SCRIPT_DIR}/generate_gaz
 
 echo "=== Stage 2/3: Launch Klein training jobs ==="
 CUDA_VISIBLE_DEVICES="${GPU_KLEIN_H}" "${PYTHON_BIN}" "${SCRIPT_DIR}/train_slider.py" \
-  --config "${SCRIPT_DIR}/config/eye_gaze_horizontal_texture_v1.yaml" \
+  --config "${KLEIN_CFG_H}" \
   > "${LOG_DIR}/klein_horizontal.log" 2>&1 &
 PID_KLEIN_H=$!
 echo "Klein horizontal PID: ${PID_KLEIN_H}"
 
 CUDA_VISIBLE_DEVICES="${GPU_KLEIN_V}" "${PYTHON_BIN}" "${SCRIPT_DIR}/train_slider.py" \
-  --config "${SCRIPT_DIR}/config/eye_gaze_vertical_texture_v1.yaml" \
+  --config "${KLEIN_CFG_V}" \
   > "${LOG_DIR}/klein_vertical.log" 2>&1 &
 PID_KLEIN_V=$!
 echo "Klein vertical PID: ${PID_KLEIN_V}"
@@ -71,13 +75,13 @@ echo "=== Stage 3/3: Launch FLUX.1-dev slider training jobs ==="
 pushd "${FLUX_SLIDERS_DIR}" > /dev/null
 
 CUDA_VISIBLE_DEVICES="${GPU_FLUX_H}" "${PYTHON_BIN}" -c \
-"from flux_sliders.text_sliders import FLUXTextSliders; FLUXTextSliders('config/gaze_horizontal_flux.yaml').train()" \
+"from flux_sliders.text_sliders import FLUXTextSliders('${FLUX_CFG_H}').train()" \
   > "${LOG_DIR}/flux_horizontal.log" 2>&1 &
 PID_FLUX_H=$!
 echo "FLUX horizontal PID: ${PID_FLUX_H}"
 
 CUDA_VISIBLE_DEVICES="${GPU_FLUX_V}" "${PYTHON_BIN}" -c \
-"from flux_sliders.text_sliders import FLUXTextSliders; FLUXTextSliders('config/gaze_vertical_flux.yaml').train()" \
+"from flux_sliders.text_sliders import FLUXTextSliders; FLUXTextSliders('${FLUX_CFG_V}').train()" \
   > "${LOG_DIR}/flux_vertical.log" 2>&1 &
 PID_FLUX_V=$!
 echo "FLUX vertical PID: ${PID_FLUX_V}"

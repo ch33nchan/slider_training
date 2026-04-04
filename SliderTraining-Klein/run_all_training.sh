@@ -12,6 +12,10 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 FLUX_SLIDERS_DIR="${FLUX_SLIDERS_DIR:-${PROJECT_ROOT}/flux-sliders}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 LOG_DIR="${LOG_DIR:-/tmp/eye_gaze_training_logs}"
+KLEIN_CFG_H="${KLEIN_CFG_H:-config/eye_gaze_horizontal_texture_v1.yaml}"
+KLEIN_CFG_V="${KLEIN_CFG_V:-config/eye_gaze_vertical_texture_v1.yaml}"
+FLUX_CFG_H="${FLUX_CFG_H:-config/gaze_horizontal_flux.yaml}"
+FLUX_CFG_V="${FLUX_CFG_V:-config/gaze_vertical_flux.yaml}"
 mkdir -p "${LOG_DIR}"
 
 # Optional venv activation:
@@ -25,14 +29,14 @@ cd "${SCRIPT_DIR}"
 
 echo "=== [GPU ${GPU_KLEIN_H:-0}] Klein Horizontal Gaze ==="
 CUDA_VISIBLE_DEVICES="${GPU_KLEIN_H:-0}" "${PYTHON_BIN}" train_slider.py \
-  --config config/eye_gaze_horizontal_texture_v1.yaml \
+  --config "${KLEIN_CFG_H}" \
   > "${LOG_DIR}/klein_horizontal.log" 2>&1 &
 PID0=$!
 echo "PID: ${PID0}"
 
 echo "=== [GPU ${GPU_KLEIN_V:-1}] Klein Vertical Gaze ==="
 CUDA_VISIBLE_DEVICES="${GPU_KLEIN_V:-1}" "${PYTHON_BIN}" train_slider.py \
-  --config config/eye_gaze_vertical_texture_v1.yaml \
+  --config "${KLEIN_CFG_V}" \
   > "${LOG_DIR}/klein_vertical.log" 2>&1 &
 PID1=$!
 echo "PID: ${PID1}"
@@ -41,7 +45,7 @@ echo "=== [GPU ${GPU_FLUX_H:-2}] FLUX.1-dev Horizontal Gaze ==="
 (
   cd "${FLUX_SLIDERS_DIR}"
   CUDA_VISIBLE_DEVICES="${GPU_FLUX_H:-2}" "${PYTHON_BIN}" -c \
-  "from flux_sliders.text_sliders import FLUXTextSliders; FLUXTextSliders('config/gaze_horizontal_flux.yaml').train()"
+  "from flux_sliders.text_sliders import FLUXTextSliders; FLUXTextSliders('${FLUX_CFG_H}').train()"
 ) > "${LOG_DIR}/flux_horizontal.log" 2>&1 &
 PID2=$!
 echo "PID: ${PID2}"
@@ -50,7 +54,7 @@ echo "=== [GPU ${GPU_FLUX_V:-3}] FLUX.1-dev Vertical Gaze ==="
 (
   cd "${FLUX_SLIDERS_DIR}"
   CUDA_VISIBLE_DEVICES="${GPU_FLUX_V:-3}" "${PYTHON_BIN}" -c \
-  "from flux_sliders.text_sliders import FLUXTextSliders; FLUXTextSliders('config/gaze_vertical_flux.yaml').train()"
+  "from flux_sliders.text_sliders import FLUXTextSliders('${FLUX_CFG_V}').train()"
 ) > "${LOG_DIR}/flux_vertical.log" 2>&1 &
 PID3=$!
 echo "PID: ${PID3}"
