@@ -6,6 +6,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${SCRIPT_DIR}"
 
 INPUT_DIR="${INPUT_DIR:-${REPO_ROOT}/characters}"
+MODE="${MODE:-PURE_LORA}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/pipeline_lora_gaze_characters}"
 CONFIG="${CONFIG:-config/eye_gaze_horizontal_texture_v1.yaml}"
 LORA_PATH="${LORA_PATH:-$(ls -1 outputs/gaze_horizontal_klein_texture/weights/slider_*.safetensors 2>/dev/null | sort | tail -n 1)}"
@@ -20,6 +21,11 @@ SIZE="${SIZE:-0}"
 PREVIEW_SIZE="${PREVIEW_SIZE:-512}"
 PROMPT="${PROMPT:-a person}"
 SEED="${SEED:-42}"
+SCALES="${SCALES:--8 0 8}"
+SCALE_MULTIPLIER="${SCALE_MULTIPLIER:-1.6}"
+SOURCE_LOCK="${SOURCE_LOCK:-0.08}"
+EYE_BLEND_MODE="${EYE_BLEND_MODE:-adaptive}"
+EYE_BLEND_STRENGTH="${EYE_BLEND_STRENGTH:-0.72}"
 
 if [ ! -d "${INPUT_DIR}" ]; then
     echo "Missing input directory: ${INPUT_DIR}" >&2
@@ -44,6 +50,7 @@ echo "Input dir: ${INPUT_DIR}"
 echo "Output root: ${OUTPUT_ROOT}"
 echo "LoRA: ${LORA_PATH}"
 echo "Images: ${#FACES[@]}"
+echo "Mode: ${MODE}"
 
 for FACE in "${FACES[@]}"; do
     STEM="$(basename "${FACE}")"
@@ -51,20 +58,41 @@ for FACE in "${FACES[@]}"; do
     OUT_DIR="${OUTPUT_ROOT}/${STEM}"
     mkdir -p "${OUT_DIR}"
     echo "Processing ${STEM} ..."
-    CUDA_VISIBLE_DEVICES="${GPU_ID}" python3 pipeline_lora_gaze.py \
-        --config "${CONFIG}" \
-        --lora_path "${LORA_PATH}" \
-        --source "${FACE}" \
-        --left_gaze "${LEFT_GAZE}" \
-        --right_gaze "${RIGHT_GAZE}" \
-        --left_scale "${LEFT_SCALE}" \
-        --right_scale "${RIGHT_SCALE}" \
-        --size "${SIZE}" \
-        --preview_size "${PREVIEW_SIZE}" \
-        --strength "${STRENGTH}" \
-        --prompt "${PROMPT}" \
-        --seed "${SEED}" \
-        --output "${OUT_DIR}/result.png"
+    if [ "${MODE}" = "PURE_LORA" ]; then
+        CUDA_VISIBLE_DEVICES="${GPU_ID}" python3 inference_slider.py \
+            --config "${CONFIG}" \
+            --lora_path "${LORA_PATH}" \
+            --source_image "${FACE}" \
+            --prompt "${PROMPT}" \
+            --scales ${SCALES} \
+            --left_scale "${LEFT_SCALE}" \
+            --right_scale "${RIGHT_SCALE}" \
+            --strength "${STRENGTH}" \
+            --size "${SIZE}" \
+            --scale_multiplier "${SCALE_MULTIPLIER}" \
+            --source_lock "${SOURCE_LOCK}" \
+            --eye_blend_mode "${EYE_BLEND_MODE}" \
+            --eye_blend_strength "${EYE_BLEND_STRENGTH}" \
+            --keep_source_at_zero \
+            --save_eye_mask \
+            --seed "${SEED}" \
+            --output "${OUT_DIR}/result.png"
+    else
+        CUDA_VISIBLE_DEVICES="${GPU_ID}" python3 pipeline_lora_gaze.py \
+            --config "${CONFIG}" \
+            --lora_path "${LORA_PATH}" \
+            --source "${FACE}" \
+            --left_gaze "${LEFT_GAZE}" \
+            --right_gaze "${RIGHT_GAZE}" \
+            --left_scale "${LEFT_SCALE}" \
+            --right_scale "${RIGHT_SCALE}" \
+            --size "${SIZE}" \
+            --preview_size "${PREVIEW_SIZE}" \
+            --strength "${STRENGTH}" \
+            --prompt "${PROMPT}" \
+            --seed "${SEED}" \
+            --output "${OUT_DIR}/result.png"
+    fi
     echo "  Done: ${OUT_DIR}/result.png"
 done
 

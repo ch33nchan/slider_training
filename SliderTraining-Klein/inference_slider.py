@@ -133,6 +133,20 @@ def blend_eyes_only(
     return np.clip(blended + 0.5, 0, 255).astype(np.uint8)
 
 
+def resolve_sizes(image_path: str, requested_size: int) -> tuple[tuple[int, int], tuple[int, int]]:
+    with Image.open(image_path).convert("RGB") as src:
+        src_width, src_height = src.size
+
+    if requested_size > 0:
+        final_width, final_height = requested_size, requested_size
+    else:
+        final_width, final_height = src_width, src_height
+
+    model_width = max(16, (final_width // 16) * 16)
+    model_height = max(16, (final_height // 16) * 16)
+    return (final_width, final_height), (model_width, model_height)
+
+
 def load_transformer(path: str, device: str, dtype=torch.bfloat16):
     """Load Klein 9B transformer from safetensors."""
     params = Klein9BParams()
@@ -248,12 +262,21 @@ def main():
     parser.add_argument("--keep_source_at_zero", action="store_true",
                         help="Use exact source image for scale=0 output.")
     parser.add_argument("--save_eye_mask", action="store_true")
+    parser.add_argument("--size", type=int, default=0,
+                        help="Square output size. Use 0 to preserve exact input resolution in final saves.")
+    parser.add_argument("--left_scale", type=float, default=None,
+                        help="Optional explicit left output scale. If set with right_scale, also saves left_full/right_full.")
+    parser.add_argument("--right_scale", type=float, default=None,
+                        help="Optional explicit right output scale. If set with left_scale, also saves left_full/right_full.")
     parser.add_argument("--output", type=str, default="outputs/inference_result.png")
     args = parser.parse_args()
 
     cfg = OmegaConf.load(args.config)
     device = cfg.device
     dtype = torch.bfloat16
+    final_size, model_size = resolve_sizes(args.source_image, args.size)
+    final_width, final_height = final_size
+    model_width, model_height = model_size
 
     # -------------------------------------------------------------------------
     # Load models
@@ -278,16 +301,15 @@ def main():
     # Encode source image as reference tokens + as starting latent (img2img)
     # -------------------------------------------------------------------------
     print("Encoding reference image...")
-    source_img = Image.open(args.source_image).convert("RGB").resize(
-        (cfg.width, cfg.height)
-    )
-    source_rgb = np.array(source_img)
-    ref_tokens, ref_ids = encode_image_refs(vae, [source_img])
+    source_full = Image.open(args.source_image).convert("RGB").resize(final_size, Image.LANCZOS)
+    source_img = source_full.resize(model_size, Image.LANCZOS)
+    source_rgb = np.array(source_full)
+    ref_tokens, ref_ids = encode_image_refs(vae, [source_img], limit_pixels=model_width * model_height)
     ref_tokens = ref_tokens.to(device, dtype=dtype)
     ref_ids = ref_ids.to(device)
 
     # Encode source as starting latent for img2img
-    source_tensor = default_prep(source_img, limit_pixels=cfg.height * cfg.width)
+    source_tensor = default_prep(source_img, limit_pixels=model_width * model_height)
     if isinstance(source_tensor, list):
         source_tensor = source_tensor[0]
     with torch.no_grad():
@@ -351,8 +373,8 @@ def main():
     # -------------------------------------------------------------------------
     # Generate images at different slider scales
     # -------------------------------------------------------------------------
-    height_latent = cfg.height // 16
-    width_latent = cfg.width // 16
+    height_latent = model_height // 16
+    width_latent = model_width // 16
 
     slider_images = []
     print(f"\nGenerating images at scales: {args.scales}")
@@ -395,10 +417,10 @@ def main():
         )
 
         # Decode to PIL
-        output_pil = latent_to_pil(vae, packed_output, noise_ids, dtype)
+        output_pil = latent_to_pil(vae, packed_output, noise_ids, dtype).resize(final_size, Image.LANCZOS)
 
         if args.keep_source_at_zero and abs(scale) < 1e-8:
-            output_pil = source_img.copy()
+            output_pil = source_full.copy()
         elif eye_mask is not None:
             if args.eye_blend_mode == "fixed":
                 blend_strength = float(args.eye_blend_strength)
@@ -422,7 +444,7 @@ def main():
     fig, axes = plt.subplots(1, n, figsize=(5 * n, 5))
 
     # Source image
-    axes[0].imshow(np.array(source_img))
+    axes[0].imshow(np.array(source_full))
     axes[0].axis("off")
     axes[0].set_title("Source", fontsize=14)
 
@@ -448,6 +470,19 @@ def main():
         individual_path = output_path.parent / f"scale_{scale:+.1f}.png"
         img.save(str(individual_path))
         print(f"  Saved {individual_path}")
+
+    if args.left_scale is not None and args.right_scale is not None:
+        scale_to_img = {float(scale): img for scale, img in zip(args.scales, slider_images)}
+        left_img = scale_to_img.get(float(args.left_scale))
+        right_img = scale_to_img.get(float(args.right_scale))
+        if left_img is not None:
+            left_path = output_path.parent / "left_full.png"
+            left_img.save(str(left_path))
+            print(f"  Saved {left_path}")
+        if right_img is not None:
+            right_path = output_path.parent / "right_full.png"
+            right_img.save(str(right_path))
+            print(f"  Saved {right_path}")
 
 
 if __name__ == "__main__":
