@@ -95,9 +95,9 @@ def denoise_img2img(
     ):
         t_vec = torch.full((1,), t_curr, device=device, dtype=dtype)
 
-        # No reference conditioning — LoRA drives the concept direction
-        img_input = img
-        img_input_ids = noise_ids
+        # Keep identity fixed by conditioning on source-image reference tokens.
+        img_input = torch.cat([img, ref_tokens], dim=1)
+        img_input_ids = torch.cat([noise_ids, ref_ids], dim=1)
 
         with network:
             pred = transformer(
@@ -135,7 +135,7 @@ def main():
     )
     parser.add_argument("--num_steps", type=int, default=28)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--strength", type=float, default=0.6,
+    parser.add_argument("--strength", type=float, default=0.3,
                         help="img2img strength 0-1: 0=no change, 1=full regen from noise")
     parser.add_argument("--output", type=str, default="outputs/inference_result.png")
     args = parser.parse_args()
