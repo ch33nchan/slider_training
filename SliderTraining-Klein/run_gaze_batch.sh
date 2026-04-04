@@ -26,6 +26,8 @@ SCALE_MULTIPLIER="${SCALE_MULTIPLIER:-1.6}"
 SOURCE_LOCK="${SOURCE_LOCK:-0.08}"
 EYE_BLEND_MODE="${EYE_BLEND_MODE:-adaptive}"
 EYE_BLEND_STRENGTH="${EYE_BLEND_STRENGTH:-0.72}"
+EYE_EDIT_MODE="${EYE_EDIT_MODE:-delta}"
+DELTA_GAIN="${DELTA_GAIN:-2.4}"
 
 if [ ! -d "${INPUT_DIR}" ]; then
     echo "Missing input directory: ${INPUT_DIR}" >&2
@@ -73,6 +75,8 @@ for FACE in "${FACES[@]}"; do
             --source_lock "${SOURCE_LOCK}" \
             --eye_blend_mode "${EYE_BLEND_MODE}" \
             --eye_blend_strength "${EYE_BLEND_STRENGTH}" \
+            --eye_edit_mode "${EYE_EDIT_MODE}" \
+            --delta_gain "${DELTA_GAIN}" \
             --keep_source_at_zero \
             --save_eye_mask \
             --seed "${SEED}" \

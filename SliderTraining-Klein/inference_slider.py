@@ -133,6 +133,23 @@ def blend_eyes_only(
     return np.clip(blended + 0.5, 0, 255).astype(np.uint8)
 
 
+def apply_eye_delta(
+    source_rgb: np.ndarray,
+    baseline_rgb: np.ndarray,
+    target_rgb: np.ndarray,
+    eye_mask: np.ndarray,
+    delta_gain: float,
+    blend_strength: float,
+) -> np.ndarray:
+    alpha = np.clip(eye_mask * float(blend_strength), 0.0, 1.0)[..., None].astype(np.float32)
+    source_f = source_rgb.astype(np.float32)
+    baseline_f = baseline_rgb.astype(np.float32)
+    target_f = target_rgb.astype(np.float32)
+    delta = (target_f - baseline_f) * float(delta_gain)
+    edited = source_f + alpha * delta
+    return np.clip(edited + 0.5, 0, 255).astype(np.uint8)
+
+
 def resolve_sizes(image_path: str, requested_size: int) -> tuple[tuple[int, int], tuple[int, int]]:
     with Image.open(image_path).convert("RGB") as src:
         src_width, src_height = src.size
@@ -257,6 +274,10 @@ def main():
                         help="Blend generated eyes onto original source to preserve face identity.")
     parser.add_argument("--eye_blend_strength", type=float, default=0.9,
                         help="Base blend strength for eye-only compositing.")
+    parser.add_argument("--eye_edit_mode", type=str, default="delta", choices=["absolute", "delta"],
+                        help="absolute blends target eyes directly; delta applies target-minus-baseline eye change to the source.")
+    parser.add_argument("--delta_gain", type=float, default=2.4,
+                        help="Amplification for eye delta edits when eye_edit_mode=delta.")
     parser.add_argument("--eye_mask_scale", type=float, default=1.8)
     parser.add_argument("--eye_mask_blur", type=int, default=31)
     parser.add_argument("--keep_source_at_zero", action="store_true",
@@ -377,6 +398,7 @@ def main():
     width_latent = model_width // 16
 
     slider_images = []
+    raw_slider_images = []
     print(f"\nGenerating images at scales: {args.scales}")
 
     for scale in args.scales:
@@ -417,7 +439,15 @@ def main():
         )
 
         # Decode to PIL
-        output_pil = latent_to_pil(vae, packed_output, noise_ids, dtype).resize(final_size, Image.LANCZOS)
+        raw_output_pil = latent_to_pil(vae, packed_output, noise_ids, dtype).resize(final_size, Image.LANCZOS)
+        raw_slider_images.append(raw_output_pil)
+        slider_images.append(raw_output_pil)
+
+    baseline_index = min(range(len(args.scales)), key=lambda i: abs(args.scales[i]))
+    baseline_rgb = np.array(raw_slider_images[baseline_index]) if raw_slider_images else None
+
+    for idx, scale in enumerate(args.scales):
+        output_pil = raw_slider_images[idx]
 
         if args.keep_source_at_zero and abs(scale) < 1e-8:
             output_pil = source_full.copy()
@@ -428,10 +458,26 @@ def main():
                 scale_ratio = abs(scale) / max(max_abs_scale, 1e-6)
                 blend_strength = float(args.eye_blend_strength) * (0.45 + 0.55 * scale_ratio)
             blend_strength = max(0.0, min(1.0, blend_strength))
-            blended = blend_eyes_only(source_rgb, np.array(output_pil), eye_mask, blend_strength)
-            output_pil = Image.fromarray(blended)
 
-        slider_images.append(output_pil)
+            if args.eye_edit_mode == "delta" and baseline_rgb is not None:
+                edited = apply_eye_delta(
+                    source_rgb=source_rgb,
+                    baseline_rgb=baseline_rgb,
+                    target_rgb=np.array(raw_slider_images[idx]),
+                    eye_mask=eye_mask,
+                    delta_gain=args.delta_gain,
+                    blend_strength=blend_strength,
+                )
+            else:
+                edited = blend_eyes_only(
+                    source_rgb,
+                    np.array(raw_slider_images[idx]),
+                    eye_mask,
+                    blend_strength,
+                )
+            output_pil = Image.fromarray(edited)
+
+        slider_images[idx] = output_pil
 
     # -------------------------------------------------------------------------
     # Create stacked visualization
