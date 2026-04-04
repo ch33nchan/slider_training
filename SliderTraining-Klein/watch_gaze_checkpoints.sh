@@ -51,10 +51,12 @@ process_checkpoint() {
     local checkpoint_name
     local checkpoint_stem
     local checkpoint_output
+    local checkpoint_log
 
     checkpoint_name="$(basename "${checkpoint_path}")"
     checkpoint_stem="${checkpoint_name%.safetensors}"
     checkpoint_output="${OUTPUT_ROOT}/${checkpoint_stem}"
+    checkpoint_log="${checkpoint_output}/watch.log"
 
     if [ -f "${checkpoint_output}/.done" ]; then
         return 1
@@ -62,36 +64,41 @@ process_checkpoint() {
 
     echo "=== Processing ${checkpoint_name} ==="
     mkdir -p "${checkpoint_output}"
+    rm -f "${checkpoint_output}/.failed"
 
-    INPUT_DIR="${INPUT_DIR}" \
-    MODE="${MODE}" \
-    OUTPUT_ROOT="${checkpoint_output}" \
-    CONFIG="${CONFIG}" \
-    LORA_PATH="${checkpoint_path}" \
-    GPU_ID="${GPU_ID}" \
-    LEFT_SCALE="${LEFT_SCALE}" \
-    RIGHT_SCALE="${RIGHT_SCALE}" \
-    STRENGTH="${STRENGTH}" \
-    SIZE="${SIZE}" \
-    SCALES="${SCALES}" \
-    SCALE_MULTIPLIER="${SCALE_MULTIPLIER}" \
-    SOURCE_LOCK="${SOURCE_LOCK}" \
-    EYE_BLEND_MODE="${EYE_BLEND_MODE}" \
-    EYE_BLEND_STRENGTH="${EYE_BLEND_STRENGTH}" \
-    EYE_EDIT_MODE="${EYE_EDIT_MODE}" \
-    DELTA_GAIN="${DELTA_GAIN}" \
-    CROP_MODE="${CROP_MODE}" \
-    CROP_PADDING="${CROP_PADDING}" \
-    CROP_THRESHOLD="${CROP_THRESHOLD}" \
-    CROP_FEATHER="${CROP_FEATHER}" \
-    PROMPT="${PROMPT}" \
-    SEED="${SEED}" \
-    bash "${SCRIPT_DIR}/run_gaze_batch.sh" | tee "${checkpoint_output}/watch.log"
+    if INPUT_DIR="${INPUT_DIR}" \
+        MODE="${MODE}" \
+        OUTPUT_ROOT="${checkpoint_output}" \
+        CONFIG="${CONFIG}" \
+        LORA_PATH="${checkpoint_path}" \
+        GPU_ID="${GPU_ID}" \
+        LEFT_SCALE="${LEFT_SCALE}" \
+        RIGHT_SCALE="${RIGHT_SCALE}" \
+        STRENGTH="${STRENGTH}" \
+        SIZE="${SIZE}" \
+        SCALES="${SCALES}" \
+        SCALE_MULTIPLIER="${SCALE_MULTIPLIER}" \
+        SOURCE_LOCK="${SOURCE_LOCK}" \
+        EYE_BLEND_MODE="${EYE_BLEND_MODE}" \
+        EYE_BLEND_STRENGTH="${EYE_BLEND_STRENGTH}" \
+        EYE_EDIT_MODE="${EYE_EDIT_MODE}" \
+        DELTA_GAIN="${DELTA_GAIN}" \
+        CROP_MODE="${CROP_MODE}" \
+        CROP_PADDING="${CROP_PADDING}" \
+        CROP_THRESHOLD="${CROP_THRESHOLD}" \
+        CROP_FEATHER="${CROP_FEATHER}" \
+        PROMPT="${PROMPT}" \
+        SEED="${SEED}" \
+        bash "${SCRIPT_DIR}/run_gaze_batch.sh" 2>&1 | tee "${checkpoint_log}"; then
+        date -Is > "${checkpoint_output}/.done"
+        ln -sfn "${checkpoint_stem}" "${OUTPUT_ROOT}/latest"
+        echo "=== Done ${checkpoint_name} -> ${checkpoint_output} ==="
+        return 0
+    fi
 
-    date -Is > "${checkpoint_output}/.done"
-    ln -sfn "${checkpoint_stem}" "${OUTPUT_ROOT}/latest"
-    echo "=== Done ${checkpoint_name} -> ${checkpoint_output} ==="
-    return 0
+    date -Is > "${checkpoint_output}/.failed"
+    echo "=== Failed ${checkpoint_name} -> ${checkpoint_output} ==="
+    return 1
 }
 
 echo "Input dir: ${INPUT_DIR}"
