@@ -486,8 +486,19 @@ def main():
 
         if bidirectional:
             # ----- Two LoRA passes: scale=+1 and scale=-1 -----
+            # Run them sequentially to avoid holding both autograd graphs in memory.
             gt_bwd = pos_pred + cfg.eta * (-direction)
             gt_bwd = (gt_bwd / gt_bwd.norm()) * neg_pred.norm()
+
+            src_pred_base = None
+            if bg_preserve_weight > 0 and bg_tokens is not None:
+                with torch.no_grad():
+                    src_pred_base = transformer(
+                        x=x_src, x_ids=x_src_ids, timesteps=t_vec,
+                        ctx=neutral_txt, ctx_ids=neutral_txt_ids,
+                        guidance=None,
+                    )
+                    src_pred_base = src_pred_base[:, :packed_x_t.shape[1]]
 
             network.set_lora_slider(1.0)
             with ExitStack() as stack:
@@ -499,6 +510,14 @@ def main():
                 )
                 lora_pred_fwd = lora_pred_fwd[:, :packed_x_t.shape[1]]
 
+            loss_fwd = weighted_token_mse(lora_pred_fwd, gt_fwd, token_weights)
+            if src_pred_base is not None:
+                bg_loss_fwd = weighted_token_mse(lora_pred_fwd, src_pred_base, bg_tokens)
+                loss_fwd = loss_fwd + bg_preserve_weight * bg_loss_fwd
+            (0.5 * loss_fwd).backward()
+            loss_value = 0.5 * float(loss_fwd.detach().item())
+            del lora_pred_fwd, loss_fwd
+
             network.set_lora_slider(-1.0)
             with ExitStack() as stack:
                 stack.enter_context(network)
@@ -509,23 +528,15 @@ def main():
                 )
                 lora_pred_bwd = lora_pred_bwd[:, :packed_x_t.shape[1]]
 
-            network.set_lora_slider(1.0)  # reset to default
-
-            loss_fwd = weighted_token_mse(lora_pred_fwd, gt_fwd, token_weights)
             loss_bwd = weighted_token_mse(lora_pred_bwd, gt_bwd, token_weights)
-            loss = 0.5 * (loss_fwd + loss_bwd)
-
-            if bg_preserve_weight > 0 and bg_tokens is not None:
-                with torch.no_grad():
-                    src_pred_base = transformer(
-                        x=x_src, x_ids=x_src_ids, timesteps=t_vec,
-                        ctx=neutral_txt, ctx_ids=neutral_txt_ids,
-                        guidance=None,
-                    )
-                    src_pred_base = src_pred_base[:, :packed_x_t.shape[1]]
-                bg_loss_fwd = weighted_token_mse(lora_pred_fwd, src_pred_base, bg_tokens)
+            if src_pred_base is not None:
                 bg_loss_bwd = weighted_token_mse(lora_pred_bwd, src_pred_base, bg_tokens)
-                loss = loss + bg_preserve_weight * 0.5 * (bg_loss_fwd + bg_loss_bwd)
+                loss_bwd = loss_bwd + bg_preserve_weight * bg_loss_bwd
+            (0.5 * loss_bwd).backward()
+            loss_value += 0.5 * float(loss_bwd.detach().item())
+            del lora_pred_bwd, loss_bwd
+            network.set_lora_slider(1.0)
+            loss = loss_value
         else:
             # ----- One forward pass WITH LoRA (using source ref as baseline) -----
             with ExitStack() as stack:
@@ -550,12 +561,14 @@ def main():
                 bg_loss = weighted_token_mse(lora_pred, src_pred_base, bg_tokens)
                 loss = loss + bg_preserve_weight * bg_loss
 
-        loss.backward()
+        if not bidirectional:
+            loss.backward()
         optimizer.step()
         optimizer.zero_grad()
 
-        losses.append(loss.item())
-        progress_bar.set_postfix(loss=f"{loss.item():.6f}")
+        loss_value = float(loss if bidirectional else loss.item())
+        losses.append(loss_value)
+        progress_bar.set_postfix(loss=f"{loss_value:.6f}")
 
         # Periodic save and sample
         if step > 0 and step % cfg.sample_every == 0:
