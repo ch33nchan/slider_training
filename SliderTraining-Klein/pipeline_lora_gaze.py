@@ -49,6 +49,16 @@ LIVEPORTRAIT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../
 sys.path.insert(0, LIVEPORTRAIT_DIR)
 
 
+def resolve_runtime_size(image_path: str, requested_size: int) -> tuple[int, int]:
+    with Image.open(image_path).convert("RGB") as src:
+        if requested_size > 0:
+            return requested_size, requested_size
+        width, height = src.size
+    width = max(16, (width // 16) * 16)
+    height = max(16, (height // 16) * 16)
+    return width, height
+
+
 def load_transformer(path, device, dtype=torch.bfloat16):
     params = Klein9BParams()
     transformer = Flux2(params)
@@ -88,7 +98,12 @@ def build_liveportrait(device_id: int):
     return GradioPipeline(inf, CropConfig(), a)
 
 
-def warp_gaze(pipeline, img_path: str, eyeball_x: float, size: int) -> np.ndarray:
+def warp_gaze(
+    pipeline,
+    img_path: str,
+    eyeball_x: float,
+    output_size: tuple[int, int],
+) -> np.ndarray:
     eye_ratio, lip_ratio = pipeline.init_retargeting_image(
         retargeting_source_scale=2.3,
         source_eye_ratio=0.4,
@@ -110,7 +125,7 @@ def warp_gaze(pipeline, img_path: str, eyeball_x: float, size: int) -> np.ndarra
         flag_stitching_retargeting_input=True,
         flag_do_crop_input_retargeting_image=True,
     )
-    out = cv2.resize(out, (size, size), interpolation=cv2.INTER_LANCZOS4)
+    out = cv2.resize(out, output_size, interpolation=cv2.INTER_LANCZOS4)
     return out
 
 
@@ -180,7 +195,13 @@ def main():
     parser.add_argument("--lora_path", required=True)
     parser.add_argument("--source", required=True)
     parser.add_argument("--gaze_strength", type=float, default=15)
-    parser.add_argument("--scales", type=float, nargs="+", default=[-5, -2.5, 0, 2.5, 5])
+    parser.add_argument("--left_gaze", type=float, default=-18.0)
+    parser.add_argument("--right_gaze", type=float, default=18.0)
+    parser.add_argument("--left_scale", type=float, default=-8.0)
+    parser.add_argument("--right_scale", type=float, default=8.0)
+    parser.add_argument("--size", type=int, default=0,
+                        help="Square output size. Use 0 to preserve source aspect ratio and near-full resolution.")
+    parser.add_argument("--preview_size", type=int, default=512)
     parser.add_argument("--strength", type=float, default=0.4)
     parser.add_argument("--prompt", default="a person")
     parser.add_argument("--num_steps", type=int, default=28)
@@ -191,12 +212,13 @@ def main():
     cfg = OmegaConf.load(args.config)
     device = cfg.device
     dtype = torch.bfloat16
-    size = cfg.height
+    runtime_width, runtime_height = resolve_runtime_size(args.source, args.size)
+    output_size = (runtime_width, runtime_height)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    source_pil = Image.open(args.source).convert("RGB").resize((size, size))
+    source_pil = Image.open(args.source).convert("RGB").resize(output_size, Image.LANCZOS)
 
     # ------------------------------------------------------------------
     # Step 1: LivePortrait warp
@@ -204,8 +226,10 @@ def main():
     print("Running LivePortrait warp...")
     device_id = int(device.split(":")[-1])
     lp = build_liveportrait(device_id)
-    right_np = warp_gaze(lp, args.source, +args.gaze_strength, size)
-    left_np  = warp_gaze(lp, args.source, -args.gaze_strength, size)
+    left_gaze = args.left_gaze if args.left_gaze is not None else -abs(args.gaze_strength)
+    right_gaze = args.right_gaze if args.right_gaze is not None else abs(args.gaze_strength)
+    right_np = warp_gaze(lp, args.source, right_gaze, output_size)
+    left_np = warp_gaze(lp, args.source, left_gaze, output_size)
     right_pil = Image.fromarray(right_np)
     left_pil  = Image.fromarray(left_np)
     right_pil.save(str(output_path.parent / "lp_right.png"))
@@ -264,32 +288,55 @@ def main():
     # ------------------------------------------------------------------
     # Step 3: Run LoRA at each scale on the LP-warped right image
     # ------------------------------------------------------------------
-    print(f"\nRunning LoRA at scales {args.scales} on LP-warped image...")
-    scale_outputs = []
-    for scale in args.scales:
-        out = denoise_with_lora(
-            transformer, network, vae, txt, txt_ids,
-            right_pil, device, dtype,
-            cfg.height, cfg.width,
-            lora_scale=scale,
-            num_steps=args.num_steps,
-            strength=args.strength,
-            seed=args.seed,
-        )
-        scale_outputs.append(out)
-        out.save(str(output_path.parent / f"scale_{scale:+.1f}.png"))
-        print(f"  scale {scale:+.1f} done")
+    print(
+        f"\nRunning LoRA refinement:"
+        f" left_scale={args.left_scale:+.1f}, right_scale={args.right_scale:+.1f},"
+        f" size={runtime_width}x{runtime_height}"
+    )
+    left_out = denoise_with_lora(
+        transformer, network, vae, txt, txt_ids,
+        left_pil, device, dtype,
+        runtime_height, runtime_width,
+        lora_scale=args.left_scale,
+        num_steps=args.num_steps,
+        strength=args.strength,
+        seed=args.seed,
+    )
+    right_out = denoise_with_lora(
+        transformer, network, vae, txt, txt_ids,
+        right_pil, device, dtype,
+        runtime_height, runtime_width,
+        lora_scale=args.right_scale,
+        num_steps=args.num_steps,
+        strength=args.strength,
+        seed=args.seed + 1,
+    )
+    left_out.save(str(output_path.parent / "lora_left_full.png"))
+    right_out.save(str(output_path.parent / "lora_right_full.png"))
+    left_out.save(str(output_path.parent / f"scale_{args.left_scale:+.1f}.png"))
+    right_out.save(str(output_path.parent / f"scale_{args.right_scale:+.1f}.png"))
 
     # ------------------------------------------------------------------
     # Step 4: Visualization strip
     # ------------------------------------------------------------------
-    panels = [source_pil, right_pil] + scale_outputs
-    titles = ["Source", f"LP warp\n(eyeball_x={args.gaze_strength})"] + \
-             [f"LP + LoRA\nscale={s:+.1f}" for s in args.scales]
+    preview_panels = [
+        source_pil.resize((args.preview_size, args.preview_size), Image.LANCZOS),
+        left_pil.resize((args.preview_size, args.preview_size), Image.LANCZOS),
+        left_out.resize((args.preview_size, args.preview_size), Image.LANCZOS),
+        right_pil.resize((args.preview_size, args.preview_size), Image.LANCZOS),
+        right_out.resize((args.preview_size, args.preview_size), Image.LANCZOS),
+    ]
+    titles = [
+        "Source",
+        f"LP Left\n(gaze={left_gaze:+.1f})",
+        f"LoRA Left\n(scale={args.left_scale:+.1f})",
+        f"LP Right\n(gaze={right_gaze:+.1f})",
+        f"LoRA Right\n(scale={args.right_scale:+.1f})",
+    ]
 
-    n = len(panels)
+    n = len(preview_panels)
     fig, axes = plt.subplots(1, n, figsize=(5 * n, 5))
-    for ax, img, title in zip(axes, panels, titles):
+    for ax, img, title in zip(axes, preview_panels, titles):
         ax.imshow(np.array(img))
         ax.axis("off")
         ax.set_title(title, fontsize=11)
@@ -297,7 +344,14 @@ def main():
     plt.savefig(str(output_path), dpi=150, bbox_inches="tight")
     plt.close()
 
+    source_pil.save(str(output_path.parent / "source_full.png"))
     print(f"\nSaved to {output_path.parent}/")
+    print("  source_full.png")
+    print("  lp_left.png")
+    print("  lp_right.png")
+    print("  lora_left_full.png")
+    print("  lora_right_full.png")
+    print("  result.png")
 
 
 if __name__ == "__main__":
