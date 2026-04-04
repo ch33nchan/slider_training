@@ -16,9 +16,9 @@ MAX_LENGTH = 512
 
 def load_text_encoder(model_path: str, device: str = "cuda", dtype=torch.bfloat16):
     """Load Qwen3-8B text encoder and tokenizer."""
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False, trust_remote_code=True)
     text_encoder = AutoModelForCausalLM.from_pretrained(
-        model_path, dtype=dtype
+        model_path, torch_dtype=dtype, trust_remote_code=True
     ).to(device)
     text_encoder.requires_grad_(False)
     text_encoder.eval()
