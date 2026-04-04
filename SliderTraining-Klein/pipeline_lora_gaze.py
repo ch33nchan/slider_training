@@ -49,14 +49,110 @@ LIVEPORTRAIT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../
 sys.path.insert(0, LIVEPORTRAIT_DIR)
 
 
-def resolve_runtime_size(image_path: str, requested_size: int) -> tuple[int, int]:
+def resolve_sizes(image_path: str, requested_size: int) -> tuple[tuple[int, int], tuple[int, int]]:
     with Image.open(image_path).convert("RGB") as src:
-        if requested_size > 0:
-            return requested_size, requested_size
-        width, height = src.size
-    width = max(16, (width // 16) * 16)
-    height = max(16, (height // 16) * 16)
-    return width, height
+        src_width, src_height = src.size
+
+    if requested_size > 0:
+        final_width, final_height = requested_size, requested_size
+    else:
+        final_width, final_height = src_width, src_height
+
+    model_width = max(16, (final_width // 16) * 16)
+    model_height = max(16, (final_height // 16) * 16)
+    return (final_width, final_height), (model_width, model_height)
+
+
+def _largest_box(boxes):
+    if len(boxes) == 0:
+        return None
+    return max(boxes, key=lambda b: int(b[2]) * int(b[3]))
+
+
+def build_eye_mask(
+    source_rgb: np.ndarray,
+    eye_mask_scale: float = 1.8,
+    eye_mask_blur: int = 31,
+) -> np.ndarray:
+    h, w = source_rgb.shape[:2]
+    gray = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY)
+
+    face_detector = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    )
+    eye_detector = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
+
+    faces = face_detector.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=5,
+        minSize=(max(48, w // 8), max(48, h // 8)),
+    )
+    face = _largest_box(faces)
+
+    eye_boxes = []
+    if face is not None:
+        fx, fy, fw, fh = map(int, face)
+        roi_y_end = fy + int(fh * 0.65)
+        roi = gray[fy:roi_y_end, fx:fx + fw]
+        detected = eye_detector.detectMultiScale(
+            roi,
+            scaleFactor=1.1,
+            minNeighbors=5,
+            minSize=(max(12, fw // 12), max(12, fh // 12)),
+        )
+        for ex, ey, ew, eh in detected:
+            eye_boxes.append((fx + int(ex), fy + int(ey), int(ew), int(eh)))
+
+    if len(eye_boxes) >= 2:
+        eye_boxes = sorted(
+            eye_boxes,
+            key=lambda b: int(b[2]) * int(b[3]),
+            reverse=True,
+        )[:4]
+        eye_boxes = sorted(eye_boxes, key=lambda b: b[0])[:2]
+    else:
+        cx = w // 2
+        cy = int(h * 0.38)
+        rx = int(w * 0.09)
+        ry = int(h * 0.05)
+        offset = int(w * 0.13)
+        eye_boxes = [
+            (cx - offset - rx, cy - ry, 2 * rx, 2 * ry),
+            (cx + offset - rx, cy - ry, 2 * rx, 2 * ry),
+        ]
+
+    mask = np.zeros((h, w), dtype=np.float32)
+    for ex, ey, ew, eh in eye_boxes:
+        cx = int(ex + ew * 0.5)
+        cy = int(ey + eh * 0.5)
+        rx = max(8, int(ew * 0.5 * eye_mask_scale))
+        ry = max(6, int(eh * 0.6 * eye_mask_scale))
+        cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 1.0, -1)
+
+    if eye_mask_blur <= 0:
+        eye_mask_blur = 1
+    if eye_mask_blur % 2 == 0:
+        eye_mask_blur += 1
+
+    mask = cv2.GaussianBlur(mask, (eye_mask_blur, eye_mask_blur), 0)
+    return np.clip(mask, 0.0, 1.0)
+
+
+def blend_preserved_gaze(
+    source_rgb: np.ndarray,
+    lp_rgb: np.ndarray,
+    lora_rgb: np.ndarray,
+    eye_mask: np.ndarray,
+    lora_mix: float,
+) -> np.ndarray:
+    alpha = eye_mask[..., None].astype(np.float32)
+    source_f = source_rgb.astype(np.float32)
+    lp_f = lp_rgb.astype(np.float32)
+    lora_f = lora_rgb.astype(np.float32)
+    eye_mix = lp_f * (1.0 - lora_mix) + lora_f * lora_mix
+    blended = source_f * (1.0 - alpha) + eye_mix * alpha
+    return np.clip(blended + 0.5, 0, 255).astype(np.uint8)
 
 
 def load_transformer(path, device, dtype=torch.bfloat16):
@@ -200,9 +296,13 @@ def main():
     parser.add_argument("--left_scale", type=float, default=-8.0)
     parser.add_argument("--right_scale", type=float, default=8.0)
     parser.add_argument("--size", type=int, default=0,
-                        help="Square output size. Use 0 to preserve source aspect ratio and near-full resolution.")
+                        help="Square output size. Use 0 to preserve exact input resolution in final saves.")
     parser.add_argument("--preview_size", type=int, default=512)
     parser.add_argument("--strength", type=float, default=0.4)
+    parser.add_argument("--lora_mix", type=float, default=0.18,
+                        help="How much LoRA output influences the final eye region. Lower is safer.")
+    parser.add_argument("--eye_mask_scale", type=float, default=1.9)
+    parser.add_argument("--eye_mask_blur", type=int, default=41)
     parser.add_argument("--prompt", default="a person")
     parser.add_argument("--num_steps", type=int, default=28)
     parser.add_argument("--seed", type=int, default=42)
@@ -212,13 +312,23 @@ def main():
     cfg = OmegaConf.load(args.config)
     device = cfg.device
     dtype = torch.bfloat16
-    runtime_width, runtime_height = resolve_runtime_size(args.source, args.size)
-    output_size = (runtime_width, runtime_height)
+    final_size, model_size = resolve_sizes(args.source, args.size)
+    final_width, final_height = final_size
+    model_width, model_height = model_size
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    source_pil = Image.open(args.source).convert("RGB").resize(output_size, Image.LANCZOS)
+    source_full_pil = Image.open(args.source).convert("RGB").resize(final_size, Image.LANCZOS)
+    source_full_rgb = np.array(source_full_pil)
+    eye_mask = build_eye_mask(
+        source_full_rgb,
+        eye_mask_scale=args.eye_mask_scale,
+        eye_mask_blur=args.eye_mask_blur,
+    )
+    Image.fromarray((eye_mask * 255.0 + 0.5).astype(np.uint8), mode="L").save(
+        str(output_path.parent / "eye_mask.png")
+    )
 
     # ------------------------------------------------------------------
     # Step 1: LivePortrait warp
@@ -228,12 +338,12 @@ def main():
     lp = build_liveportrait(device_id)
     left_gaze = args.left_gaze if args.left_gaze is not None else -abs(args.gaze_strength)
     right_gaze = args.right_gaze if args.right_gaze is not None else abs(args.gaze_strength)
-    right_np = warp_gaze(lp, args.source, right_gaze, output_size)
-    left_np = warp_gaze(lp, args.source, left_gaze, output_size)
-    right_pil = Image.fromarray(right_np)
-    left_pil  = Image.fromarray(left_np)
-    right_pil.save(str(output_path.parent / "lp_right.png"))
-    left_pil.save(str(output_path.parent / "lp_left.png"))
+    right_lp_full = warp_gaze(lp, args.source, right_gaze, final_size)
+    left_lp_full = warp_gaze(lp, args.source, left_gaze, final_size)
+    right_lp_full_pil = Image.fromarray(right_lp_full)
+    left_lp_full_pil = Image.fromarray(left_lp_full)
+    right_lp_full_pil.save(str(output_path.parent / "lp_right.png"))
+    left_lp_full_pil.save(str(output_path.parent / "lp_left.png"))
     del lp
     torch.cuda.empty_cache()
     print("  LivePortrait done")
@@ -291,12 +401,12 @@ def main():
     print(
         f"\nRunning LoRA refinement:"
         f" left_scale={args.left_scale:+.1f}, right_scale={args.right_scale:+.1f},"
-        f" size={runtime_width}x{runtime_height}"
+        f" model_size={model_width}x{model_height}, final_size={final_width}x{final_height}"
     )
     left_out = denoise_with_lora(
         transformer, network, vae, txt, txt_ids,
-        left_pil, device, dtype,
-        runtime_height, runtime_width,
+        left_lp_full_pil.resize(model_size, Image.LANCZOS), device, dtype,
+        model_height, model_width,
         lora_scale=args.left_scale,
         num_steps=args.num_steps,
         strength=args.strength,
@@ -304,27 +414,47 @@ def main():
     )
     right_out = denoise_with_lora(
         transformer, network, vae, txt, txt_ids,
-        right_pil, device, dtype,
-        runtime_height, runtime_width,
+        right_lp_full_pil.resize(model_size, Image.LANCZOS), device, dtype,
+        model_height, model_width,
         lora_scale=args.right_scale,
         num_steps=args.num_steps,
         strength=args.strength,
         seed=args.seed + 1,
     )
-    left_out.save(str(output_path.parent / "lora_left_full.png"))
-    right_out.save(str(output_path.parent / "lora_right_full.png"))
-    left_out.save(str(output_path.parent / f"scale_{args.left_scale:+.1f}.png"))
-    right_out.save(str(output_path.parent / f"scale_{args.right_scale:+.1f}.png"))
+    left_lora_full = np.array(left_out.resize(final_size, Image.LANCZOS))
+    right_lora_full = np.array(right_out.resize(final_size, Image.LANCZOS))
+    left_final = blend_preserved_gaze(
+        source_full_rgb,
+        left_lp_full,
+        left_lora_full,
+        eye_mask,
+        args.lora_mix,
+    )
+    right_final = blend_preserved_gaze(
+        source_full_rgb,
+        right_lp_full,
+        right_lora_full,
+        eye_mask,
+        args.lora_mix,
+    )
+    left_final_pil = Image.fromarray(left_final)
+    right_final_pil = Image.fromarray(right_final)
+    left_final_pil.save(str(output_path.parent / "lora_left_full.png"))
+    right_final_pil.save(str(output_path.parent / "lora_right_full.png"))
+    left_final_pil.save(str(output_path.parent / f"scale_{args.left_scale:+.1f}.png"))
+    right_final_pil.save(str(output_path.parent / f"scale_{args.right_scale:+.1f}.png"))
+    left_out.save(str(output_path.parent / "lora_left_raw.png"))
+    right_out.save(str(output_path.parent / "lora_right_raw.png"))
 
     # ------------------------------------------------------------------
     # Step 4: Visualization strip
     # ------------------------------------------------------------------
     preview_panels = [
-        source_pil.resize((args.preview_size, args.preview_size), Image.LANCZOS),
-        left_pil.resize((args.preview_size, args.preview_size), Image.LANCZOS),
-        left_out.resize((args.preview_size, args.preview_size), Image.LANCZOS),
-        right_pil.resize((args.preview_size, args.preview_size), Image.LANCZOS),
-        right_out.resize((args.preview_size, args.preview_size), Image.LANCZOS),
+        source_full_pil.resize((args.preview_size, args.preview_size), Image.LANCZOS),
+        left_lp_full_pil.resize((args.preview_size, args.preview_size), Image.LANCZOS),
+        left_final_pil.resize((args.preview_size, args.preview_size), Image.LANCZOS),
+        right_lp_full_pil.resize((args.preview_size, args.preview_size), Image.LANCZOS),
+        right_final_pil.resize((args.preview_size, args.preview_size), Image.LANCZOS),
     ]
     titles = [
         "Source",
@@ -344,13 +474,16 @@ def main():
     plt.savefig(str(output_path), dpi=150, bbox_inches="tight")
     plt.close()
 
-    source_pil.save(str(output_path.parent / "source_full.png"))
+    source_full_pil.save(str(output_path.parent / "source_full.png"))
     print(f"\nSaved to {output_path.parent}/")
     print("  source_full.png")
+    print("  eye_mask.png")
     print("  lp_left.png")
     print("  lp_right.png")
     print("  lora_left_full.png")
     print("  lora_right_full.png")
+    print("  lora_left_raw.png")
+    print("  lora_right_raw.png")
     print("  result.png")
 
 
