@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -54,7 +55,14 @@ def main() -> None:
             f"FLUXTextSliders(r'{effective_cfg_path}').train()"
         ),
     ]
-    subprocess.run(command, cwd=flux_repo, check=True)
+    env = os.environ.copy()
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        str(flux_repo)
+        if not existing_pythonpath
+        else f"{flux_repo}:{existing_pythonpath}"
+    )
+    subprocess.run(command, cwd=flux_repo, env=env, check=True)
 
 
 if __name__ == "__main__":
