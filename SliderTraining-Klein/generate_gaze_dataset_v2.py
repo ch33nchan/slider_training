@@ -279,6 +279,21 @@ def blend_eyes_only(neutral_rgb: np.ndarray, warped_rgb: np.ndarray, eye_mask: n
     return np.clip(blended + 0.5, 0, 255).astype(np.uint8)
 
 
+def collect_source_images(input_dir: Path, num_faces: int) -> list[Path]:
+    exts = ("*.png", "*.jpg", "*.jpeg", "*.webp")
+    all_sources: list[Path] = []
+    for ext in exts:
+        all_sources.extend(input_dir.glob(ext))
+
+    all_sources = sorted(p for p in all_sources if p.is_file())
+    if not all_sources:
+        raise SystemExit(f"No source images found in {input_dir}")
+
+    neutral_sources = [p for p in all_sources if p.stem.endswith("_neutral")]
+    selected_pool = neutral_sources if neutral_sources else all_sources
+    return selected_pool[:num_faces]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_dir", default="data/ffhq_source")
@@ -303,16 +318,17 @@ def main():
     for split in ["neg", "pos", "neutral", "masks"]:
         (out / split).mkdir(parents=True, exist_ok=True)
 
-    exts = ("*.png", "*.jpg", "*.jpeg", "*.webp")
-    all_sources = []
-    for ext in exts:
-        all_sources.extend(Path(args.input_dir).glob(ext))
-    sources = sorted(all_sources)[:args.num_faces]
+    input_dir = Path(args.input_dir)
+    sources = collect_source_images(input_dir, args.num_faces)
 
     print(f"Using {len(sources)} source faces from {args.input_dir}")
     print(f"Output: {args.output_dir} at {args.size}x{args.size}")
     print(f"Gaze strength: +/-{args.gaze_strength}\n")
     print(f"Blend mode: {args.blend_mode}")
+    if len(sources) < args.num_faces:
+        print(f"Requested {args.num_faces} faces, found only {len(sources)} usable images.")
+    if any(src.stem.endswith("_neutral") for src in sources):
+        print("Using *_neutral source images only.")
 
     print("Building LivePortrait...")
     pipeline = build_liveportrait(args.device_id)
