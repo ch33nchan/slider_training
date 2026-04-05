@@ -294,6 +294,18 @@ def collect_source_images(input_dir: Path, num_faces: int) -> list[Path]:
     return selected_pool[:num_faces]
 
 
+def resolve_existing_triplet(src: Path) -> tuple[Path, Path] | None:
+    if not src.stem.endswith("_neutral"):
+        return None
+
+    prefix = src.stem[: -len("_neutral")]
+    left = src.with_name(f"{prefix}_left{src.suffix}")
+    right = src.with_name(f"{prefix}_right{src.suffix}")
+    if left.exists() and right.exists():
+        return left, right
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_dir", default="data/ffhq_source")
@@ -330,11 +342,19 @@ def main():
     if any(src.stem.endswith("_neutral") for src in sources):
         print("Using *_neutral source images only.")
 
-    print("Building LivePortrait...")
-    pipeline = build_liveportrait(args.device_id)
+    triplets = [resolve_existing_triplet(src) for src in sources]
+    use_existing_triplets = all(t is not None for t in triplets)
+    if use_existing_triplets:
+        print("Using existing *_left/*_neutral/*_right triplets from input_dir.")
+        pipeline = None
+    else:
+        print("Building LivePortrait...")
+        pipeline = build_liveportrait(args.device_id)
 
     for i, src in enumerate(sources):
         stem = src.stem
+        if stem.endswith("_neutral"):
+            stem = stem[: -len("_neutral")]
         print(f"[{i+1}/{len(sources)}] {stem}")
 
         neutral_pil = Image.open(src).convert("RGB").resize((args.size, args.size), Image.LANCZOS)
@@ -350,8 +370,18 @@ def main():
             mask_u8 = np.clip(eye_mask * 255.0 + 0.5, 0, 255).astype(np.uint8)
             Image.fromarray(mask_u8, mode="L").save(str(out / "masks" / f"{stem}.png"))
 
-        neg_rgb = warp_gaze(pipeline, str(src), -args.gaze_strength, args.size)
-        pos_rgb = warp_gaze(pipeline, str(src), +args.gaze_strength, args.size)
+        triplet = resolve_existing_triplet(src)
+        if triplet is not None:
+            left_path, right_path = triplet
+            neg_rgb = np.array(
+                Image.open(left_path).convert("RGB").resize((args.size, args.size), Image.LANCZOS)
+            )
+            pos_rgb = np.array(
+                Image.open(right_path).convert("RGB").resize((args.size, args.size), Image.LANCZOS)
+            )
+        else:
+            neg_rgb = warp_gaze(pipeline, str(src), -args.gaze_strength, args.size)
+            pos_rgb = warp_gaze(pipeline, str(src), +args.gaze_strength, args.size)
 
         if args.blend_mode == "eyes_only":
             neg_rgb = blend_eyes_only(neutral_rgb, neg_rgb, eye_mask)
