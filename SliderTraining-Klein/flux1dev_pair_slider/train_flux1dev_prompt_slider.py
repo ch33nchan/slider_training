@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
@@ -30,10 +31,6 @@ def main() -> None:
     if not flux_repo.exists():
         raise FileNotFoundError(f"Missing flux-sliders repo: {flux_repo}")
 
-    sys.path.insert(0, str(flux_repo))
-
-    from flux_sliders.text_sliders import FLUXTextSliders
-
     template_path = Path(args.template_config).resolve()
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -49,8 +46,15 @@ def main() -> None:
     effective_cfg_path = output_dir / f"{args.slider_name}.yaml"
     OmegaConf.save(cfg, effective_cfg_path)
 
-    trainer = FLUXTextSliders(effective_cfg_path)
-    trainer.train()
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "from flux_sliders.text_sliders import FLUXTextSliders; "
+            f"FLUXTextSliders(r'{effective_cfg_path}').train()"
+        ),
+    ]
+    subprocess.run(command, cwd=flux_repo, check=True)
 
 
 if __name__ == "__main__":
