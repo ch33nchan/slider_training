@@ -1,0 +1,157 @@
+Input dir: /mnt/data1/srini/eyegaze/slider_training/characters
+Output root: outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600
+LoRA: outputs/gaze_horizontal_klein_texture/weights/slider_003600.safetensors
+Images: 6
+Mode: PURE_LORA
+Processing 1 ...
+Loading transformer...
+Loading VAE...
+Loading text encoder...
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:00<00:00, 168.70it/s]
+Encoding reference image...
+Loading LoRA weights...
+Created LoRA for Klein 9B: 80 modules.
+
+Generating images at scales: [-8.0, 0.0, 8.0]
+
+Scale: -8.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  33%|███▎      | 1/3 [00:00<00:01,  1.74it/s]Denoising:  67%|██████▋   | 2/3 [00:01<00:01,  1.05s/it]Denoising: 100%|██████████| 3/3 [00:03<00:00,  1.20s/it]                                                        
+Scale: 0.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  33%|███▎      | 1/3 [00:00<00:00,  3.54it/s]Denoising:  67%|██████▋   | 2/3 [00:01<00:00,  1.17it/s]Denoising: 100%|██████████| 3/3 [00:02<00:00,  1.04s/it]                                                        
+Scale: 8.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  33%|███▎      | 1/3 [00:00<00:01,  1.77it/s]Denoising:  67%|██████▋   | 2/3 [00:01<00:01,  1.05s/it]Denoising: 100%|██████████| 3/3 [00:03<00:00,  1.21s/it]                                                        
+Saved visualization to outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/1/result.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/1/eye_mask.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/1/scale_-8.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/1/scale_+0.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/1/scale_+8.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/1/left_full.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/1/right_full.png
+  Done: outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/1/result.png
+Processing 2 ...
+Loading transformer...
+Loading VAE...
+Loading text encoder...
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:00<00:00, 176.35it/s]
+Encoding reference image...
+Loading LoRA weights...
+Created LoRA for Klein 9B: 80 modules.
+
+Generating images at scales: [-8.0, 0.0, 8.0]
+
+Scale: -8.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  33%|███▎      | 1/3 [00:00<00:01,  1.04it/s]Denoising:  67%|██████▋   | 2/3 [00:03<00:01,  1.75s/it]Denoising: 100%|██████████| 3/3 [00:05<00:00,  2.01s/it]                                                        
+Scale: 0.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  33%|███▎      | 1/3 [00:00<00:00,  2.06it/s]Denoising:  67%|██████▋   | 2/3 [00:02<00:01,  1.45s/it]Denoising: 100%|██████████| 3/3 [00:04<00:00,  1.76s/it]                                                        
+Scale: 8.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  33%|███▎      | 1/3 [00:00<00:01,  1.04it/s]Denoising:  67%|██████▋   | 2/3 [00:03<00:01,  1.77s/it]Denoising: 100%|██████████| 3/3 [00:05<00:00,  2.03s/it]                                                        
+Saved visualization to outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/2/result.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/2/eye_mask.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/2/scale_-8.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/2/scale_+0.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/2/scale_+8.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/2/left_full.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/2/right_full.png
+  Done: outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/2/result.png
+Processing 4 ...
+Loading transformer...
+Loading VAE...
+Loading text encoder...
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:00<00:00, 164.03it/s]
+Encoding reference image...
+Loading LoRA weights...
+Created LoRA for Klein 9B: 80 modules.
+
+Generating images at scales: [-8.0, 0.0, 8.0]
+
+Scale: -8.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  33%|███▎      | 1/3 [00:00<00:01,  1.32it/s]Denoising:  67%|██████▋   | 2/3 [00:02<00:01,  1.38s/it]Denoising: 100%|██████████| 3/3 [00:04<00:00,  1.58s/it]                                                        
+Scale: 0.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  33%|███▎      | 1/3 [00:00<00:00,  2.63it/s]Denoising:  67%|██████▋   | 2/3 [00:02<00:01,  1.13s/it]Denoising: 100%|██████████| 3/3 [00:03<00:00,  1.37s/it]                                                        
+Scale: 8.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  33%|███▎      | 1/3 [00:00<00:01,  1.33it/s]Denoising:  67%|██████▋   | 2/3 [00:02<00:01,  1.38s/it]Denoising: 100%|██████████| 3/3 [00:04<00:00,  1.59s/it]                                                        
+Saved visualization to outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/4/result.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/4/eye_mask.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/4/scale_-8.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/4/scale_+0.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/4/scale_+8.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/4/left_full.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/4/right_full.png
+  Done: outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/4/result.png
+Processing 5 ...
+Loading transformer...
+Loading VAE...
+Loading text encoder...
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:00<00:00, 170.83it/s]
+Encoding reference image...
+Loading LoRA weights...
+Created LoRA for Klein 9B: 80 modules.
+
+Generating images at scales: [-8.0, 0.0, 8.0]
+
+Scale: -8.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  33%|███▎      | 1/3 [00:00<00:00,  3.33it/s]Denoising:  67%|██████▋   | 2/3 [00:01<00:00,  1.73it/s]Denoising: 100%|██████████| 3/3 [00:01<00:00,  1.51it/s]                                                        
+Scale: 0.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  33%|███▎      | 1/3 [00:00<00:00,  6.35it/s]Denoising:  67%|██████▋   | 2/3 [00:00<00:00,  2.19it/s]Denoising: 100%|██████████| 3/3 [00:01<00:00,  1.79it/s]                                                        
+Scale: 8.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  33%|███▎      | 1/3 [00:00<00:00,  3.43it/s]Denoising:  67%|██████▋   | 2/3 [00:01<00:00,  1.74it/s]Denoising: 100%|██████████| 3/3 [00:01<00:00,  1.51it/s]                                                        
+Saved visualization to outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/5/result.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/5/eye_mask.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/5/scale_-8.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/5/scale_+0.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/5/scale_+8.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/5/left_full.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/5/right_full.png
+  Done: outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/5/result.png
+Processing 7 ...
+Loading transformer...
+Loading VAE...
+Loading text encoder...
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:00<00:00, 168.85it/s]
+Encoding reference image...
+Loading LoRA weights...
+Created LoRA for Klein 9B: 80 modules.
+
+Generating images at scales: [-8.0, 0.0, 8.0]
+
+Scale: -8.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  33%|███▎      | 1/3 [00:00<00:01,  1.32it/s]Denoising:  67%|██████▋   | 2/3 [00:02<00:01,  1.38s/it]Denoising: 100%|██████████| 3/3 [00:04<00:00,  1.58s/it]                                                        
+Scale: 0.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  33%|███▎      | 1/3 [00:00<00:00,  2.61it/s]Denoising:  67%|██████▋   | 2/3 [00:02<00:01,  1.13s/it]Denoising: 100%|██████████| 3/3 [00:03<00:00,  1.37s/it]                                                        
+Scale: 8.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  33%|███▎      | 1/3 [00:00<00:01,  1.33it/s]Denoising:  67%|██████▋   | 2/3 [00:02<00:01,  1.38s/it]Denoising: 100%|██████████| 3/3 [00:04<00:00,  1.58s/it]                                                        
+Saved visualization to outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/7/result.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/7/eye_mask.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/7/scale_-8.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/7/scale_+0.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/7/scale_+8.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/7/left_full.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/7/right_full.png
+  Done: outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/7/result.png
+Processing tewo ...
+Loading transformer...
+Loading VAE...
+Loading text encoder...
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:00<00:00, 167.13it/s]
+Encoding reference image...
+Loading LoRA weights...
+Created LoRA for Klein 9B: 80 modules.
+
+Generating images at scales: [-8.0, 0.0, 8.0]
+
+Scale: -8.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  67%|██████▋   | 2/3 [00:00<00:00, 16.56it/s]                                                        
+Scale: 0.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising: 100%|██████████| 3/3 [00:00<00:00, 21.80it/s]                                                        
+Scale: 8.0
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  67%|██████▋   | 2/3 [00:00<00:00, 19.26it/s]                                                        
+Saved visualization to outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/tewo/result.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/tewo/eye_mask.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/tewo/scale_-8.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/tewo/scale_+0.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/tewo/scale_+8.0.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/tewo/left_full.png
+  Saved outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/tewo/right_full.png
+  Done: outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/tewo/result.png
+
+All done. Results in outputs/character_lora_checkpoints/horizontal_stronger_gpu1/slider_003600/

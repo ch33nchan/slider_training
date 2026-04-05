@@ -20,7 +20,6 @@ height: 1024
 width: 1024
 bidirectional: true
 
-# Eye-focused training to avoid LivePortrait soft-skin transfer.
 eye_region_weight: 8.0
 non_eye_region_weight: 0.2
 bg_preserve_weight: 0.35
