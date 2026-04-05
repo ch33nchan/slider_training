@@ -1,31 +1,31 @@
 pretrained_model_name_or_path: "/mnt/data1/models/base-models/black-forest-labs/FLUX.1-dev"
 device: "cuda:0"
 
-neg_image_dir: "data/gaze_horizontal_texture_maskfix/neg"
-pos_image_dir: "data/gaze_horizontal_texture_maskfix/pos"
-neutral_image_dir: "data/gaze_horizontal_texture_maskfix/neutral"
-mask_dir: "data/gaze_horizontal_texture_maskfix/masks"
+neg_image_dir: "data/gaze_horizontal_texture_maskfix_30/neg"
+pos_image_dir: "data/gaze_horizontal_texture_maskfix_30/pos"
+neutral_image_dir: "data/gaze_horizontal_texture_maskfix_30/neutral"
+mask_dir: "data/gaze_horizontal_texture_maskfix_30/masks"
 
 prompt: "portrait of a person"
 height: 1024
 width: 1024
 
-output_dir: "flux1dev_pair_slider/outputs_pair"
-slider_name: "gaze_horizontal_flux1dev_pair"
+output_dir: "flux1dev_pair_slider/outputs_pair_30"
+slider_name: "gaze_horizontal_flux1dev_pair_30"
 
 rank: 16
 alpha: 16
 train_method: "xattn"
 lr: 0.0005
-max_train_steps: 500
+max_train_steps: 1000
 sample_every: 250
-eta: 1.5
+eta: 2.25
 
 weighting_scheme: "none"
 logit_mean: 0.0
 logit_std: 1.0
 mode_scale: 1.29
 
-eye_region_weight: 8.0
-non_eye_region_weight: 0.2
-bg_preserve_weight: 0.35
+eye_region_weight: 12.0
+non_eye_region_weight: 0.15
+bg_preserve_weight: 0.25
