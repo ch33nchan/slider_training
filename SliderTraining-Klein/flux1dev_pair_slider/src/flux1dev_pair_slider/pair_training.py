@@ -1,0 +1,407 @@
+from __future__ import annotations
+
+import os
+import random
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.nn.functional as F
+from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler, FluxTransformer2DModel
+from diffusers.training_utils import compute_density_for_timestep_sampling
+from omegaconf import OmegaConf
+from PIL import Image
+from torch.optim import AdamW
+from tqdm.auto import tqdm
+from transformers import CLIPTokenizer, PretrainedConfig, T5TokenizerFast
+
+
+@dataclass
+class ImagePair:
+    stem: str
+    neg_path: str
+    pos_path: str
+    neutral_path: str
+    mask_path: Optional[str]
+
+
+def resolve_flux_repo(flux_repo: Optional[str], project_root: Path) -> Path:
+    candidates = []
+    if flux_repo:
+        candidates.append(Path(flux_repo))
+    env_flux_repo = os.environ.get("FLUX_REPO")
+    if env_flux_repo:
+        candidates.append(Path(env_flux_repo))
+    candidates.extend(
+        [
+            project_root / "flux-sliders-upstream",
+            project_root / "flux-sliders",
+        ]
+    )
+    for candidate in candidates:
+        if (candidate / "flux_sliders" / "__init__.py").exists():
+            return candidate.resolve()
+    raise FileNotFoundError("Could not resolve an importable flux-sliders repo.")
+
+
+def import_flux_components(flux_repo: Path):
+    if str(flux_repo) not in sys.path:
+        sys.path.insert(0, str(flux_repo))
+    from flux_sliders.utils.custom_flux_pipeline import FluxPipeline  # type: ignore
+    from flux_sliders.utils.lora import LoRANetwork  # type: ignore
+
+    return FluxPipeline, LoRANetwork
+
+
+def list_image_map(directory: str) -> dict[str, str]:
+    exts = {".png", ".jpg", ".jpeg", ".webp"}
+    return {
+        Path(name).stem: str(Path(directory) / name)
+        for name in os.listdir(directory)
+        if Path(name).suffix.lower() in exts
+    }
+
+
+def load_pairs(cfg) -> list[ImagePair]:
+    neg_map = list_image_map(cfg.neg_image_dir)
+    pos_map = list_image_map(cfg.pos_image_dir)
+    neutral_map = list_image_map(cfg.neutral_image_dir)
+    mask_map = list_image_map(cfg.mask_dir) if cfg.get("mask_dir") else {}
+    stems = sorted(set(neg_map) & set(pos_map) & set(neutral_map))
+    return [
+        ImagePair(
+            stem=stem,
+            neg_path=neg_map[stem],
+            pos_path=pos_map[stem],
+            neutral_path=neutral_map[stem],
+            mask_path=mask_map.get(stem),
+        )
+        for stem in stems
+    ]
+
+
+def load_rgb_tensor(path: str, width: int, height: int) -> tuple[torch.Tensor, Image.Image]:
+    image = Image.open(path).convert("RGB").resize((width, height), Image.LANCZOS)
+    array = np.asarray(image, dtype=np.float32) / 255.0
+    tensor = torch.from_numpy(array).permute(2, 0, 1) * 2.0 - 1.0
+    return tensor, image
+
+
+def load_mask_tensor(path: Optional[str], width: int, height: int) -> Optional[torch.Tensor]:
+    if not path:
+        return None
+    mask = Image.open(path).convert("L").resize((width, height), Image.LANCZOS)
+    array = np.asarray(mask, dtype=np.float32) / 255.0
+    return torch.from_numpy(array)[None, ...]
+
+
+def build_mask_weights(
+    mask_tensor: Optional[torch.Tensor],
+    latent_height: int,
+    latent_width: int,
+    eye_weight: float,
+    non_eye_weight: float,
+    device: str,
+) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    if mask_tensor is None:
+        return None, None
+    mask = mask_tensor.unsqueeze(0).to(device=device, dtype=torch.float32)
+    mask_latent = F.interpolate(mask, size=(latent_height, latent_width), mode="bilinear", align_corners=False).clamp_(0.0, 1.0)
+    token_weights = non_eye_weight + (eye_weight - non_eye_weight) * mask_latent
+    bg_weights = 1.0 - mask_latent
+    return token_weights, bg_weights
+
+
+def weighted_latent_mse(pred: torch.Tensor, target: torch.Tensor, weights: Optional[torch.Tensor]) -> torch.Tensor:
+    diff = (pred.float() - target.float()) ** 2
+    if weights is None:
+        return diff.mean()
+    weight_tensor = weights.to(device=diff.device, dtype=diff.dtype)
+    weighted = diff * weight_tensor
+    denom = (weight_tensor.sum() * diff.shape[1]).clamp_min(1e-6)
+    return weighted.sum() / denom
+
+
+def normalize_to(reference: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    ref_norm = reference.float().norm().clamp_min(1e-6)
+    target_norm = target.float().norm().clamp_min(1e-6)
+    return target * (ref_norm / target_norm)
+
+
+def load_text_encoders(model_path: str, device: str, dtype: torch.dtype):
+    text_encoder_config = PretrainedConfig.from_pretrained(model_path, subfolder="text_encoder", device_map=device)
+    text_encoder_2_config = PretrainedConfig.from_pretrained(model_path, subfolder="text_encoder_2", device_map=device)
+
+    from transformers import CLIPTextModel, T5EncoderModel
+
+    if text_encoder_config.architectures[0] != "CLIPTextModel":
+        raise ValueError(f"Unsupported text encoder: {text_encoder_config.architectures[0]}")
+    if text_encoder_2_config.architectures[0] != "T5EncoderModel":
+        raise ValueError(f"Unsupported text encoder 2: {text_encoder_2_config.architectures[0]}")
+
+    tokenizer = CLIPTokenizer.from_pretrained(model_path, subfolder="tokenizer")
+    tokenizer_2 = T5TokenizerFast.from_pretrained(model_path, subfolder="tokenizer_2")
+    text_encoder = CLIPTextModel.from_pretrained(model_path, subfolder="text_encoder", torch_dtype=dtype)
+    text_encoder_2 = T5EncoderModel.from_pretrained(model_path, subfolder="text_encoder_2", torch_dtype=dtype)
+    text_encoder.to(device)
+    text_encoder_2.to(device)
+    text_encoder.requires_grad_(False)
+    text_encoder_2.requires_grad_(False)
+    text_encoder.eval()
+    text_encoder_2.eval()
+    return tokenizer, tokenizer_2, text_encoder, text_encoder_2
+
+
+def encode_vae_latents(vae: AutoencoderKL, image_tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    latent = vae.encode(image_tensor.unsqueeze(0).to(device=vae.device, dtype=dtype)).latent_dist.sample()
+    latent = (latent - vae.config.shift_factor) * vae.config.scaling_factor
+    return latent
+
+
+def unpack_prediction(pred: torch.Tensor, flux_pipeline, height: int, width: int, vae_scale_factor: int) -> torch.Tensor:
+    return flux_pipeline._unpack_latents(pred, height=height, width=width, vae_scale_factor=vae_scale_factor)
+
+
+def build_guidance(transformer: FluxTransformer2DModel, batch_size: int, guidance_scale: float, device: str):
+    if transformer.config.guidance_embeds:
+        return torch.full([batch_size], guidance_scale, device=device, dtype=torch.float32)
+    return None
+
+
+def plot_loss(losses: list[float], save_path: Path) -> None:
+    if not losses:
+        return
+    plt.figure(figsize=(10, 4))
+    plt.plot(losses)
+    plt.xlabel("Step")
+    plt.ylabel("Loss")
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+
+
+def train_pair_slider(config_path: str, flux_repo: Optional[str] = None) -> None:
+    cfg = OmegaConf.load(config_path)
+    config_dir = Path(config_path).resolve().parent
+    project_root = config_dir.parent.parent.parent
+    flux_repo_path = resolve_flux_repo(flux_repo, project_root)
+    FluxPipeline, LoRANetwork = import_flux_components(flux_repo_path)
+
+    device = cfg.device
+    dtype = torch.bfloat16
+
+    output_dir = Path(cfg.output_dir).resolve()
+    save_dir = output_dir / f"flux-{cfg.slider_name}"
+    weight_dir = save_dir / "weights"
+    for directory in (save_dir, weight_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    OmegaConf.save(cfg, save_dir / "config.yaml")
+
+    tokenizer, tokenizer_2, text_encoder, text_encoder_2 = load_text_encoders(
+        cfg.pretrained_model_name_or_path, device, dtype
+    )
+    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+        cfg.pretrained_model_name_or_path,
+        subfolder="scheduler",
+        torch_dtype=dtype,
+    )
+    vae = AutoencoderKL.from_pretrained(
+        cfg.pretrained_model_name_or_path,
+        subfolder="vae",
+        torch_dtype=dtype,
+    ).to(device)
+    transformer = FluxTransformer2DModel.from_pretrained(
+        cfg.pretrained_model_name_or_path,
+        subfolder="transformer",
+        torch_dtype=dtype,
+    ).to(device)
+    vae.requires_grad_(False)
+    transformer.requires_grad_(False)
+    vae.eval()
+    transformer.eval()
+
+    flux_pipeline = FluxPipeline(
+        scheduler,
+        vae,
+        text_encoder,
+        tokenizer,
+        text_encoder_2,
+        tokenizer_2,
+        transformer,
+    )
+
+    prompt_embeds, pooled_prompt_embeds, text_ids = flux_pipeline.encode_prompt(
+        prompt=cfg.prompt,
+        prompt_2=cfg.prompt,
+        device=device,
+        num_images_per_prompt=1,
+        max_sequence_length=512,
+    )
+    text_encoder.to("cpu")
+    text_encoder_2.to("cpu")
+    del text_encoder, text_encoder_2, tokenizer, tokenizer_2
+    torch.cuda.empty_cache()
+
+    pairs = load_pairs(cfg)
+    if not pairs:
+        raise ValueError("No matched neg/pos/neutral image triplets found.")
+
+    network = LoRANetwork(
+        transformer,
+        rank=int(cfg.rank),
+        multiplier=1.0,
+        alpha=float(cfg.alpha),
+        train_method=str(cfg.train_method),
+        save_dir=save_dir,
+    ).to(device, dtype=dtype)
+    params = network.prepare_optimizer_params()
+    optimizer = AdamW(params, lr=float(cfg.lr))
+
+    vae_scale_factor = 2 ** (len(vae.config.block_out_channels))
+    guidance = build_guidance(transformer, 1, 3.5, device)
+    losses: list[float] = []
+    progress = tqdm(range(int(cfg.max_train_steps)), desc="FLUX Pair Training")
+
+    for step in progress:
+        pair = random.choice(pairs)
+        neg_tensor, _ = load_rgb_tensor(pair.neg_path, int(cfg.width), int(cfg.height))
+        pos_tensor, _ = load_rgb_tensor(pair.pos_path, int(cfg.width), int(cfg.height))
+        src_tensor, _ = load_rgb_tensor(pair.neutral_path, int(cfg.width), int(cfg.height))
+        mask_tensor = load_mask_tensor(pair.mask_path, int(cfg.width), int(cfg.height))
+
+        with torch.no_grad():
+            neg_latent = encode_vae_latents(vae, neg_tensor, dtype)
+            pos_latent = encode_vae_latents(vae, pos_tensor, dtype)
+            src_latent = encode_vae_latents(vae, src_tensor, dtype)
+
+        u = compute_density_for_timestep_sampling(
+            weighting_scheme=str(cfg.get("weighting_scheme", "none")),
+            batch_size=1,
+            logit_mean=float(cfg.get("logit_mean", 0.0)),
+            logit_std=float(cfg.get("logit_std", 1.0)),
+            mode_scale=float(cfg.get("mode_scale", 1.29)),
+        )
+        indices = (u * scheduler.config.num_train_timesteps).long()
+        timesteps = scheduler.timesteps[indices].to(device=device)
+        sigma = (timesteps.float() / float(scheduler.config.num_train_timesteps)).view(1, 1, 1, 1).to(device=device, dtype=dtype)
+
+        noise = torch.randn_like(src_latent)
+        x_neg = (1.0 - sigma) * neg_latent + sigma * noise
+        x_pos = (1.0 - sigma) * pos_latent + sigma * noise
+        x_src = (1.0 - sigma) * src_latent + sigma * noise
+
+        packed_neg = flux_pipeline._pack_latents(x_neg, 1, x_neg.shape[1], x_neg.shape[2], x_neg.shape[3])
+        packed_pos = flux_pipeline._pack_latents(x_pos, 1, x_pos.shape[1], x_pos.shape[2], x_pos.shape[3])
+        packed_src = flux_pipeline._pack_latents(x_src, 1, x_src.shape[1], x_src.shape[2], x_src.shape[3])
+        img_ids = flux_pipeline._prepare_latent_image_ids(1, x_src.shape[2], x_src.shape[3], device, dtype)
+
+        token_weights, bg_weights = build_mask_weights(
+            mask_tensor,
+            latent_height=x_src.shape[2],
+            latent_width=x_src.shape[3],
+            eye_weight=float(cfg.get("eye_region_weight", 1.0)),
+            non_eye_weight=float(cfg.get("non_eye_region_weight", 1.0)),
+            device=device,
+        )
+
+        with torch.no_grad():
+            src_pred_base = transformer(
+                hidden_states=packed_src,
+                timestep=timesteps / 1000,
+                guidance=guidance,
+                pooled_projections=pooled_prompt_embeds,
+                encoder_hidden_states=prompt_embeds,
+                txt_ids=text_ids,
+                img_ids=img_ids,
+                return_dict=False,
+            )[0]
+            neg_pred = transformer(
+                hidden_states=packed_neg,
+                timestep=timesteps / 1000,
+                guidance=guidance,
+                pooled_projections=pooled_prompt_embeds,
+                encoder_hidden_states=prompt_embeds,
+                txt_ids=text_ids,
+                img_ids=img_ids,
+                return_dict=False,
+            )[0]
+            pos_pred = transformer(
+                hidden_states=packed_pos,
+                timestep=timesteps / 1000,
+                guidance=guidance,
+                pooled_projections=pooled_prompt_embeds,
+                encoder_hidden_states=prompt_embeds,
+                txt_ids=text_ids,
+                img_ids=img_ids,
+                return_dict=False,
+            )[0]
+
+            src_pred_base = unpack_prediction(src_pred_base, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
+            neg_pred = unpack_prediction(neg_pred, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
+            pos_pred = unpack_prediction(pos_pred, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
+
+        direction = 0.5 * (pos_pred - neg_pred)
+        gt_fwd = normalize_to(src_pred_base, src_pred_base + float(cfg.eta) * direction)
+        gt_bwd = normalize_to(src_pred_base, src_pred_base - float(cfg.eta) * direction)
+
+        optimizer.zero_grad(set_to_none=True)
+        loss_value = 0.0
+        bg_weight = float(cfg.get("bg_preserve_weight", 0.0))
+
+        network.set_lora_slider(1.0)
+        with network:
+            pred_fwd = transformer(
+                hidden_states=packed_src,
+                timestep=timesteps / 1000,
+                guidance=guidance,
+                pooled_projections=pooled_prompt_embeds,
+                encoder_hidden_states=prompt_embeds,
+                txt_ids=text_ids,
+                img_ids=img_ids,
+                return_dict=False,
+            )[0]
+        pred_fwd = unpack_prediction(pred_fwd, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
+        loss_fwd = weighted_latent_mse(pred_fwd, gt_fwd, token_weights)
+        if bg_weight > 0 and bg_weights is not None:
+            loss_fwd = loss_fwd + bg_weight * weighted_latent_mse(pred_fwd, src_pred_base, bg_weights)
+        (0.5 * loss_fwd).backward()
+        loss_value += 0.5 * float(loss_fwd.detach().item())
+
+        network.set_lora_slider(-1.0)
+        with network:
+            pred_bwd = transformer(
+                hidden_states=packed_src,
+                timestep=timesteps / 1000,
+                guidance=guidance,
+                pooled_projections=pooled_prompt_embeds,
+                encoder_hidden_states=prompt_embeds,
+                txt_ids=text_ids,
+                img_ids=img_ids,
+                return_dict=False,
+            )[0]
+        pred_bwd = unpack_prediction(pred_bwd, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
+        loss_bwd = weighted_latent_mse(pred_bwd, gt_bwd, token_weights)
+        if bg_weight > 0 and bg_weights is not None:
+            loss_bwd = loss_bwd + bg_weight * weighted_latent_mse(pred_bwd, src_pred_base, bg_weights)
+        (0.5 * loss_bwd).backward()
+        loss_value += 0.5 * float(loss_bwd.detach().item())
+
+        optimizer.step()
+
+        losses.append(loss_value)
+        progress.set_postfix(loss=f"{loss_value:.6f}")
+
+        if (step + 1) % int(cfg.sample_every) == 0:
+            weight_path = weight_dir / f"flux-{cfg.slider_name}_{step + 1:06d}.safetensors"
+            network.save_weights(str(weight_path), dtype=dtype)
+            plot_loss(losses, save_dir / "loss.png")
+
+    latest_path = weight_dir / f"flux-{cfg.slider_name}_latest.safetensors"
+    network.save_weights(str(latest_path), dtype=dtype)
+    plot_loss(losses, save_dir / "loss.png")
