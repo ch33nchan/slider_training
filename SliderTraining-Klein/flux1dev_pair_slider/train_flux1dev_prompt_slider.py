@@ -51,6 +51,7 @@ def main() -> None:
         sys.executable,
         "-c",
         (
+            f"import sys; sys.path.insert(0, r'{flux_repo}'); "
             "from flux_sliders.text_sliders import FLUXTextSliders; "
             f"FLUXTextSliders(r'{effective_cfg_path}').train()"
         ),
