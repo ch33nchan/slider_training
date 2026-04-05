@@ -52,6 +52,141 @@ def _largest_box(boxes):
     return max(boxes, key=lambda b: int(b[2]) * int(b[3]))
 
 
+def _box_center(box):
+    x, y, w, h = map(float, box)
+    return x + 0.5 * w, y + 0.5 * h
+
+
+def _box_area(box):
+    return max(0.0, float(box[2])) * max(0.0, float(box[3]))
+
+
+def _box_iou(box_a, box_b):
+    ax0, ay0, aw, ah = map(float, box_a)
+    bx0, by0, bw, bh = map(float, box_b)
+    ax1 = ax0 + aw
+    ay1 = ay0 + ah
+    bx1 = bx0 + bw
+    by1 = by0 + bh
+
+    ix0 = max(ax0, bx0)
+    iy0 = max(ay0, by0)
+    ix1 = min(ax1, bx1)
+    iy1 = min(ay1, by1)
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0.0
+
+    inter = (ix1 - ix0) * (iy1 - iy0)
+    union = _box_area(box_a) + _box_area(box_b) - inter
+    if union <= 1e-6:
+        return 0.0
+    return float(inter / union)
+
+
+def _dedupe_boxes(boxes, iou_threshold=0.18):
+    deduped = []
+    for box in sorted(boxes, key=_box_area, reverse=True):
+        if any(_box_iou(box, kept) >= iou_threshold for kept in deduped):
+            continue
+        deduped.append(tuple(map(int, box)))
+    return deduped
+
+
+def _default_eye_boxes(image_width, image_height, face_box=None):
+    if face_box is not None:
+        fx, fy, fw, fh = map(int, face_box)
+        eye_w = max(12, int(fw * 0.18))
+        eye_h = max(8, int(fh * 0.10))
+        eye_cy = fy + int(fh * 0.39)
+        left_cx = fx + int(fw * 0.34)
+        right_cx = fx + int(fw * 0.66)
+        return [
+            (left_cx - eye_w // 2, eye_cy - eye_h // 2, eye_w, eye_h),
+            (right_cx - eye_w // 2, eye_cy - eye_h // 2, eye_w, eye_h),
+        ]
+
+    cx = image_width // 2
+    cy = int(image_height * 0.38)
+    rx = int(image_width * 0.09)
+    ry = int(image_height * 0.05)
+    offset = int(image_width * 0.13)
+    return [
+        (cx - offset - rx, cy - ry, 2 * rx, 2 * ry),
+        (cx + offset - rx, cy - ry, 2 * rx, 2 * ry),
+    ]
+
+
+def _filter_eye_boxes(eye_boxes, face_box):
+    if face_box is None:
+        return [tuple(map(int, box)) for box in eye_boxes]
+
+    fx, fy, fw, fh = map(float, face_box)
+    filtered = []
+    for box in eye_boxes:
+        ex, ey, ew, eh = map(float, box)
+        cx, cy = _box_center(box)
+        aspect = ew / max(eh, 1.0)
+        if ew < fw * 0.07 or ew > fw * 0.32:
+            continue
+        if eh < fh * 0.05 or eh > fh * 0.20:
+            continue
+        if cx < fx + fw * 0.10 or cx > fx + fw * 0.90:
+            continue
+        if cy < fy + fh * 0.18 or cy > fy + fh * 0.52:
+            continue
+        if aspect < 0.6 or aspect > 3.5:
+            continue
+        filtered.append((int(ex), int(ey), int(ew), int(eh)))
+    return _dedupe_boxes(filtered)
+
+
+def _select_eye_pair(eye_boxes, face_box):
+    if len(eye_boxes) < 2:
+        return None
+
+    if face_box is None:
+        face_width = max(float(max(box[0] + box[2] for box in eye_boxes) - min(box[0] for box in eye_boxes)), 1.0)
+        face_height = max(float(max(box[1] + box[3] for box in eye_boxes) - min(box[1] for box in eye_boxes)), 1.0)
+        face_center_x = sum(_box_center(box)[0] for box in eye_boxes) / float(len(eye_boxes))
+    else:
+        fx, fy, fw, fh = map(float, face_box)
+        face_width = max(fw, 1.0)
+        face_height = max(fh, 1.0)
+        face_center_x = fx + 0.5 * fw
+
+    best_pair = None
+    best_score = -1e9
+    for i in range(len(eye_boxes)):
+        for j in range(i + 1, len(eye_boxes)):
+            left, right = sorted((eye_boxes[i], eye_boxes[j]), key=lambda box: box[0])
+            left_cx, left_cy = _box_center(left)
+            right_cx, right_cy = _box_center(right)
+            separation = (right_cx - left_cx) / face_width
+            vertical_gap = abs(right_cy - left_cy) / face_height
+            overlap = _box_iou(left, right)
+            area_ratio = min(_box_area(left), _box_area(right)) / max(_box_area(left), _box_area(right), 1.0)
+
+            score = area_ratio * 3.0
+            score -= vertical_gap * 6.0
+            score -= abs(separation - 0.32) * 5.0
+            score -= overlap * 8.0
+
+            if left_cx >= face_center_x or right_cx <= face_center_x:
+                score -= 2.5
+            if separation < 0.16 or separation > 0.72:
+                score -= 2.0
+            if vertical_gap > 0.14:
+                score -= 2.0
+
+            if score > best_score:
+                best_score = score
+                best_pair = [left, right]
+
+    if best_score < -0.25:
+        return None
+    return best_pair
+
+
 def build_eye_mask(
     source_rgb: np.ndarray,
     eye_mask_scale: float = 1.8,
@@ -59,6 +194,7 @@ def build_eye_mask(
 ) -> np.ndarray:
     h, w = source_rgb.shape[:2]
     eye_boxes = []
+    face = None
     if cv2 is not None:
         gray = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY)
         face_detector = cv2.CascadeClassifier(
@@ -86,31 +222,24 @@ def build_eye_mask(
             for ex, ey, ew, eh in detected:
                 eye_boxes.append((fx + int(ex), fy + int(ey), int(ew), int(eh)))
 
-    if len(eye_boxes) >= 2:
-        eye_boxes = sorted(
-            eye_boxes,
-            key=lambda b: int(b[2]) * int(b[3]),
-            reverse=True,
-        )[:4]
-        eye_boxes = sorted(eye_boxes, key=lambda b: b[0])[:2]
+    eye_boxes = _filter_eye_boxes(eye_boxes, face)
+    eye_pair = _select_eye_pair(eye_boxes[:6], face)
+    if eye_pair is not None:
+        eye_boxes = eye_pair
     else:
-        cx = w // 2
-        cy = int(h * 0.38)
-        rx = int(w * 0.09)
-        ry = int(h * 0.05)
-        offset = int(w * 0.13)
-        eye_boxes = [
-            (cx - offset - rx, cy - ry, 2 * rx, 2 * ry),
-            (cx + offset - rx, cy - ry, 2 * rx, 2 * ry),
-        ]
+        eye_boxes = _default_eye_boxes(w, h, face)
 
     yy, xx = np.mgrid[0:h, 0:w]
     mask = np.zeros((h, w), dtype=np.float32)
+    face_width = float(face[2]) if face is not None else float(w)
+    face_height = float(face[3]) if face is not None else float(h)
     for ex, ey, ew, eh in eye_boxes:
         cx = float(ex + ew * 0.5)
         cy = float(ey + eh * 0.5)
         rx = float(max(8, int(ew * 0.5 * eye_mask_scale)))
         ry = float(max(6, int(eh * 0.6 * eye_mask_scale)))
+        rx = min(rx, max(10.0, face_width * 0.16))
+        ry = min(ry, max(8.0, face_height * 0.11))
         ellipse = (((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2) <= 1.0
         mask[ellipse] = 1.0
 
