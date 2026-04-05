@@ -101,6 +101,125 @@ def load_mask_tensor(path: Optional[str], width: int, height: int) -> Optional[t
     return torch.from_numpy(array)[None, ...]
 
 
+def mask_bbox(mask_tensor: torch.Tensor, threshold: float) -> tuple[int, int, int, int]:
+    mask_2d = mask_tensor[0]
+    ys, xs = torch.where(mask_2d > threshold)
+    height, width = mask_2d.shape
+    if xs.numel() == 0 or ys.numel() == 0:
+        return 0, 0, width, height
+    x0 = int(xs.min().item())
+    y0 = int(ys.min().item())
+    x1 = int(xs.max().item()) + 1
+    y1 = int(ys.max().item()) + 1
+    return x0, y0, x1, y1
+
+
+def expand_bbox(
+    bbox: tuple[int, int, int, int],
+    image_width: int,
+    image_height: int,
+    padding: float,
+    min_size: int,
+) -> tuple[int, int, int, int]:
+    x0, y0, x1, y1 = bbox
+    box_width = x1 - x0
+    box_height = y1 - y0
+    center_x = 0.5 * (x0 + x1)
+    center_y = 0.5 * (y0 + y1)
+    new_width = max(min_size, int(round(box_width * padding)))
+    new_height = max(min_size, int(round(box_height * padding)))
+    nx0 = max(0, int(round(center_x - new_width / 2)))
+    ny0 = max(0, int(round(center_y - new_height / 2)))
+    nx1 = min(image_width, nx0 + new_width)
+    ny1 = min(image_height, ny0 + new_height)
+    nx0 = max(0, nx1 - new_width)
+    ny0 = max(0, ny1 - new_height)
+    return nx0, ny0, nx1, ny1
+
+
+def jitter_bbox(
+    bbox: tuple[int, int, int, int],
+    image_width: int,
+    image_height: int,
+    shift_ratio: float,
+    scale_ratio: float,
+) -> tuple[int, int, int, int]:
+    if shift_ratio <= 0.0 and scale_ratio <= 0.0:
+        return bbox
+    x0, y0, x1, y1 = bbox
+    box_width = x1 - x0
+    box_height = y1 - y0
+    center_x = 0.5 * (x0 + x1)
+    center_y = 0.5 * (y0 + y1)
+    center_x += random.uniform(-shift_ratio, shift_ratio) * box_width
+    center_y += random.uniform(-shift_ratio, shift_ratio) * box_height
+    scale = 1.0 + random.uniform(-scale_ratio, scale_ratio)
+    new_width = max(32, int(round(box_width * scale)))
+    new_height = max(32, int(round(box_height * scale)))
+    nx0 = max(0, int(round(center_x - new_width / 2)))
+    ny0 = max(0, int(round(center_y - new_height / 2)))
+    nx1 = min(image_width, nx0 + new_width)
+    ny1 = min(image_height, ny0 + new_height)
+    nx0 = max(0, nx1 - new_width)
+    ny0 = max(0, ny1 - new_height)
+    return nx0, ny0, nx1, ny1
+
+
+def crop_and_resize_tensor(
+    tensor: torch.Tensor,
+    bbox: tuple[int, int, int, int],
+    out_height: int,
+    out_width: int,
+) -> torch.Tensor:
+    x0, y0, x1, y1 = bbox
+    cropped = tensor[:, y0:y1, x0:x1]
+    if cropped.shape[-2:] == (out_height, out_width):
+        return cropped
+    resized = F.interpolate(
+        cropped.unsqueeze(0),
+        size=(out_height, out_width),
+        mode="bilinear",
+        align_corners=False,
+    )
+    return resized.squeeze(0)
+
+
+def maybe_crop_to_eye_region(
+    neg_tensor: torch.Tensor,
+    pos_tensor: torch.Tensor,
+    src_tensor: torch.Tensor,
+    mask_tensor: Optional[torch.Tensor],
+    cfg,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    if not bool(cfg.get("train_eye_crop_only", False)) or mask_tensor is None:
+        return neg_tensor, pos_tensor, src_tensor, mask_tensor
+
+    image_height, image_width = src_tensor.shape[-2:]
+    bbox = mask_bbox(mask_tensor, threshold=float(cfg.get("eye_crop_threshold", 0.08)))
+    bbox = expand_bbox(
+        bbox=bbox,
+        image_width=image_width,
+        image_height=image_height,
+        padding=float(cfg.get("eye_crop_padding", 4.0)),
+        min_size=int(cfg.get("eye_crop_min_size", 192)),
+    )
+    bbox = jitter_bbox(
+        bbox=bbox,
+        image_width=image_width,
+        image_height=image_height,
+        shift_ratio=float(cfg.get("eye_crop_shift_jitter", 0.03)),
+        scale_ratio=float(cfg.get("eye_crop_scale_jitter", 0.08)),
+    )
+
+    out_height = int(cfg.height)
+    out_width = int(cfg.width)
+    neg_cropped = crop_and_resize_tensor(neg_tensor, bbox, out_height, out_width)
+    pos_cropped = crop_and_resize_tensor(pos_tensor, bbox, out_height, out_width)
+    src_cropped = crop_and_resize_tensor(src_tensor, bbox, out_height, out_width)
+    mask_cropped = crop_and_resize_tensor(mask_tensor, bbox, out_height, out_width).clamp_(0.0, 1.0)
+    return neg_cropped, pos_cropped, src_cropped, mask_cropped
+
+
 def build_mask_weights(
     mask_tensor: Optional[torch.Tensor],
     latent_height: int,
@@ -274,6 +393,13 @@ def train_pair_slider(config_path: str, flux_repo: Optional[str] = None) -> None
         pos_tensor, _ = load_rgb_tensor(pair.pos_path, int(cfg.width), int(cfg.height))
         src_tensor, _ = load_rgb_tensor(pair.neutral_path, int(cfg.width), int(cfg.height))
         mask_tensor = load_mask_tensor(pair.mask_path, int(cfg.width), int(cfg.height))
+        neg_tensor, pos_tensor, src_tensor, mask_tensor = maybe_crop_to_eye_region(
+            neg_tensor=neg_tensor,
+            pos_tensor=pos_tensor,
+            src_tensor=src_tensor,
+            mask_tensor=mask_tensor,
+            cfg=cfg,
+        )
 
         with torch.no_grad():
             neg_latent = encode_vae_latents(vae, neg_tensor, dtype)
@@ -349,6 +475,8 @@ def train_pair_slider(config_path: str, flux_repo: Optional[str] = None) -> None
         direction = 0.5 * (pos_pred - neg_pred)
         gt_fwd = normalize_to(src_pred_base, src_pred_base + float(cfg.eta) * direction)
         gt_bwd = normalize_to(src_pred_base, src_pred_base - float(cfg.eta) * direction)
+        target_fwd_delta = gt_fwd - src_pred_base
+        target_bwd_delta = gt_bwd - src_pred_base
 
         optimizer.zero_grad(set_to_none=True)
         loss_value = 0.0
@@ -367,7 +495,8 @@ def train_pair_slider(config_path: str, flux_repo: Optional[str] = None) -> None
                 return_dict=False,
             )[0]
         pred_fwd = unpack_prediction(pred_fwd, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
-        loss_fwd = weighted_latent_mse(pred_fwd, gt_fwd, token_weights)
+        pred_fwd_delta = pred_fwd - src_pred_base
+        loss_fwd = weighted_latent_mse(pred_fwd_delta, target_fwd_delta, token_weights)
         if bg_weight > 0 and bg_weights is not None:
             loss_fwd = loss_fwd + bg_weight * weighted_latent_mse(pred_fwd, src_pred_base, bg_weights)
         (0.5 * loss_fwd).backward()
@@ -386,7 +515,8 @@ def train_pair_slider(config_path: str, flux_repo: Optional[str] = None) -> None
                 return_dict=False,
             )[0]
         pred_bwd = unpack_prediction(pred_bwd, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
-        loss_bwd = weighted_latent_mse(pred_bwd, gt_bwd, token_weights)
+        pred_bwd_delta = pred_bwd - src_pred_base
+        loss_bwd = weighted_latent_mse(pred_bwd_delta, target_bwd_delta, token_weights)
         if bg_weight > 0 and bg_weights is not None:
             loss_bwd = loss_bwd + bg_weight * weighted_latent_mse(pred_bwd, src_pred_base, bg_weights)
         (0.5 * loss_bwd).backward()
