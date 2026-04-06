@@ -568,7 +568,9 @@ def train_pair_slider(
     if overrides:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
     config_dir = Path(config_path).resolve().parent
-    project_root = config_dir.parent.parent.parent
+    project_root = config_dir.parent.parent
+    if not (project_root / "utils" / "l2cs_loss.py").exists():
+        raise FileNotFoundError(f"Could not locate project root from config path: {config_path}")
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
     flux_repo_path = resolve_flux_repo(flux_repo, project_root)
