@@ -413,6 +413,18 @@ def import_flux_components(flux_repo: Path):
     return FluxPipeline, LoRANetwork, calculate_shift, retrieve_timesteps
 
 
+def build_eval_flux_pipeline_class(base_cls):
+    class EvalFluxPipeline(base_cls):
+        @property
+        def _execution_device(self):  # noqa: N802
+            forced = getattr(self, "_forced_execution_device", None)
+            if forced is not None:
+                return forced
+            return super()._execution_device
+
+    return EvalFluxPipeline
+
+
 def load_text_encoders(model_path: str, device: str, dtype: torch.dtype):
     text_encoder_config = PretrainedConfig.from_pretrained(model_path, subfolder="text_encoder", device_map=device)
     text_encoder_2_config = PretrainedConfig.from_pretrained(model_path, subfolder="text_encoder_2", device_map=device)
@@ -614,6 +626,7 @@ def main() -> None:
     project_root = Path(__file__).resolve().parent.parent
     flux_repo_path = resolve_flux_repo(args.flux_repo, project_root)
     FluxPipeline, LoRANetwork, calculate_shift_fn, retrieve_timesteps_fn = import_flux_components(flux_repo_path)
+    EvalFluxPipeline = build_eval_flux_pipeline_class(FluxPipeline)
     dtype = torch.bfloat16
 
     if not input_dir.exists():
@@ -647,7 +660,9 @@ def main() -> None:
     vae.eval()
     transformer.eval()
 
-    pipe = FluxPipeline(
+    device = torch.device(args.device)
+
+    pipe = EvalFluxPipeline(
         scheduler,
         vae,
         text_encoder,
@@ -656,11 +671,12 @@ def main() -> None:
         tokenizer_2,
         transformer,
     )
-    pipe.to(args.device)
+    pipe._forced_execution_device = device
+    pipe.to(device)
     prompt_embeds, pooled_prompt_embeds, _ = pipe.encode_prompt(
         prompt=args.prompt,
         prompt_2=args.prompt,
-        device=args.device,
+        device=device,
         num_images_per_prompt=1,
         max_sequence_length=512,
     )
@@ -674,7 +690,7 @@ def main() -> None:
         alpha=lora_alpha,
         train_method="xattn",
         save_dir=str(output_root),
-    ).to(args.device, dtype=dtype)
+    ).to(device, dtype=dtype)
     lora_state = remap_peft_lora_state_dict(lora_state, set(network.state_dict().keys()))
     network.load_state_dict(lora_state, strict=False)
 
@@ -731,7 +747,7 @@ def main() -> None:
                 steps=args.steps,
                 strength=args.strength,
                 seed=args.seed,
-                device=args.device,
+                device=str(device),
                 dtype=dtype,
                 skip_slider_timestep_till=args.skip_slider_timestep_till,
             )
