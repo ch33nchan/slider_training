@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
 import numpy as np
 import torch
+from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler, FluxTransformer2DModel
 from PIL import Image, ImageDraw, ImageFilter
-
-try:
-    from diffusers import FluxImg2ImgPipeline
-except ImportError:
-    from diffusers.pipelines.flux.pipeline_flux_img2img import FluxImg2ImgPipeline
+from safetensors.torch import load_file
+from transformers import CLIPTokenizer, PretrainedConfig, T5TokenizerFast
 
 try:
     import cv2
@@ -27,6 +27,7 @@ def parse_args() -> argparse.Namespace:
     repo_root = script_dir.parent.parent
     parser = argparse.ArgumentParser()
     parser.add_argument("--lora-path", required=True)
+    parser.add_argument("--flux-repo", default=None)
     parser.add_argument("--input-dir", default=str(repo_root / "characters"))
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--model-path", default="/mnt/data1/models/base-models/black-forest-labs/FLUX.1-dev")
@@ -47,6 +48,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--crop-padding", type=float, default=4.0)
     parser.add_argument("--crop-threshold", type=float, default=0.08)
     parser.add_argument("--crop-feather", type=float, default=0.18)
+    parser.add_argument("--training-scale-max", type=float, default=2.0)
+    parser.add_argument("--user-scale-max", type=float, default=5.0)
+    parser.add_argument("--skip-slider-timestep-till", type=int, default=0)
     parser.add_argument("--keep-source-at-zero", action="store_true")
     parser.add_argument("--save-eye-mask", action="store_true")
     return parser.parse_args()
@@ -371,6 +375,187 @@ def load_input_image(image: Image.Image) -> Image.Image:
     return image.resize((model_width, model_height), Image.LANCZOS)
 
 
+def user_scale_to_lora(scale: float, training_scale_max: float, user_scale_max: float) -> float:
+    if user_scale_max <= 0:
+        raise ValueError("user_scale_max must be positive.")
+    clipped = max(-user_scale_max, min(user_scale_max, scale))
+    return clipped * (training_scale_max / user_scale_max)
+
+
+def resolve_flux_repo(flux_repo: str | None, project_root: Path) -> Path:
+    candidates: list[Path] = []
+    if flux_repo:
+        candidates.append(Path(flux_repo))
+    env_flux_repo = os.environ.get("FLUX_REPO")
+    if env_flux_repo:
+        candidates.append(Path(env_flux_repo))
+    workspace_root = project_root.parent
+    candidates.extend(
+        [
+            workspace_root / "flux-sliders-upstream",
+            workspace_root / "flux-sliders",
+            project_root / "flux-sliders-upstream",
+            project_root / "flux-sliders",
+        ]
+    )
+    for candidate in candidates:
+        if (candidate / "flux_sliders" / "__init__.py").exists():
+            return candidate.resolve()
+    raise FileNotFoundError("Could not resolve an importable flux-sliders repo.")
+
+
+def import_flux_components(flux_repo: Path):
+    if str(flux_repo) not in sys.path:
+        sys.path.insert(0, str(flux_repo))
+    from flux_sliders.utils.custom_flux_pipeline import FluxPipeline, calculate_shift, retrieve_timesteps  # type: ignore
+    from flux_sliders.utils.lora import LoRANetwork  # type: ignore
+
+    return FluxPipeline, LoRANetwork, calculate_shift, retrieve_timesteps
+
+
+def load_text_encoders(model_path: str, device: str, dtype: torch.dtype):
+    text_encoder_config = PretrainedConfig.from_pretrained(model_path, subfolder="text_encoder", device_map=device)
+    text_encoder_2_config = PretrainedConfig.from_pretrained(model_path, subfolder="text_encoder_2", device_map=device)
+
+    from transformers import CLIPTextModel, T5EncoderModel
+
+    if text_encoder_config.architectures[0] != "CLIPTextModel":
+        raise ValueError(f"Unsupported text encoder: {text_encoder_config.architectures[0]}")
+    if text_encoder_2_config.architectures[0] != "T5EncoderModel":
+        raise ValueError(f"Unsupported text encoder 2: {text_encoder_2_config.architectures[0]}")
+
+    tokenizer = CLIPTokenizer.from_pretrained(model_path, subfolder="tokenizer")
+    tokenizer_2 = T5TokenizerFast.from_pretrained(model_path, subfolder="tokenizer_2")
+    text_encoder = CLIPTextModel.from_pretrained(model_path, subfolder="text_encoder", torch_dtype=dtype)
+    text_encoder_2 = T5EncoderModel.from_pretrained(model_path, subfolder="text_encoder_2", torch_dtype=dtype)
+    text_encoder.to(device)
+    text_encoder_2.to(device)
+    text_encoder.requires_grad_(False)
+    text_encoder_2.requires_grad_(False)
+    text_encoder.eval()
+    text_encoder_2.eval()
+    return tokenizer, tokenizer_2, text_encoder, text_encoder_2
+
+
+def infer_lora_hyperparams(state_dict: dict[str, torch.Tensor]) -> tuple[int, float]:
+    rank = None
+    alpha = None
+    for key, value in state_dict.items():
+        if key.endswith(".lora_down.weight"):
+            rank = int(value.shape[0])
+            break
+    for key, value in state_dict.items():
+        if key.endswith(".alpha"):
+            alpha = float(value.item())
+            break
+    if rank is None:
+        raise ValueError("Could not infer LoRA rank from checkpoint.")
+    if alpha is None:
+        alpha = float(rank)
+    return rank, alpha
+
+
+def prepare_packed_source_latents(pipe, source_image: Image.Image, device: str, dtype: torch.dtype):
+    source_tensor = pipe.image_processor.preprocess(source_image).to(device=device, dtype=dtype)
+    latents = pipe.vae.encode(source_tensor).latent_dist.sample()
+    latents = (latents - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
+    packed = pipe._pack_latents(
+        latents,
+        latents.shape[0],
+        latents.shape[1],
+        latents.shape[2],
+        latents.shape[3],
+    )
+    return latents, packed
+
+
+def generate_crop(
+    pipe,
+    network,
+    calculate_shift_fn,
+    retrieve_timesteps_fn,
+    prompt_embeds: torch.Tensor,
+    pooled_prompt_embeds: torch.Tensor,
+    source_image: Image.Image,
+    scale: float,
+    training_scale_max: float,
+    user_scale_max: float,
+    guidance: float,
+    steps: int,
+    strength: float,
+    seed: int,
+    device: str,
+    dtype: torch.dtype,
+    skip_slider_timestep_till: int,
+) -> Image.Image:
+    model_source = load_input_image(source_image)
+    model_width, model_height = model_source.size
+    source_latents, packed_source = prepare_packed_source_latents(pipe, model_source, device=device, dtype=dtype)
+
+    generator = torch.Generator(device=device).manual_seed(seed)
+    noise = torch.randn(
+        source_latents.shape,
+        generator=generator,
+        device=device,
+        dtype=dtype,
+    )
+    packed_noise = pipe._pack_latents(
+        noise,
+        noise.shape[0],
+        noise.shape[1],
+        noise.shape[2],
+        noise.shape[3],
+    )
+
+    sigmas = np.linspace(1.0, 1 / steps, steps)
+    image_seq_len = packed_noise.shape[1]
+    mu = calculate_shift_fn(
+        image_seq_len,
+        pipe.scheduler.config.base_image_seq_len,
+        pipe.scheduler.config.max_image_seq_len,
+        pipe.scheduler.config.base_shift,
+        pipe.scheduler.config.max_shift,
+    )
+    timesteps, _ = retrieve_timesteps_fn(
+        pipe.scheduler,
+        steps,
+        device,
+        None,
+        sigmas,
+        mu=mu,
+    )
+
+    if strength >= 1.0:
+        start_idx = 0
+        packed_start = packed_noise
+    else:
+        start_idx = int((1.0 - strength) * (len(timesteps) - 1))
+        start_idx = max(0, min(start_idx, len(timesteps) - 1))
+        t_start = timesteps[start_idx].to(device=device, dtype=dtype)
+        packed_start = (1.0 - t_start) * packed_source + t_start * packed_noise
+
+    network.set_lora_slider(user_scale_to_lora(scale, training_scale_max, user_scale_max))
+    with torch.no_grad():
+        output = pipe(
+            prompt=None,
+            prompt_2=None,
+            height=model_height,
+            width=model_width,
+            num_inference_steps=steps,
+            guidance_scale=guidance,
+            generator=generator,
+            latents=packed_start,
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
+            output_type="pil",
+            from_timestep=start_idx,
+            till_timestep=None,
+            network=network,
+            skip_slider_timestep_till=skip_slider_timestep_till,
+        )
+    return output.images[0]
+
+
 def save_strip(images: Iterable[Image.Image], labels: Iterable[str], output_path: Path) -> None:
     images = list(images)
     labels = list(labels)
@@ -385,31 +570,15 @@ def save_strip(images: Iterable[Image.Image], labels: Iterable[str], output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(output_path)
 
-
-def generate_crop(
-    pipe: FluxImg2ImgPipeline,
-    source_image: Image.Image,
-    prompt: str,
-    strength: float,
-    guidance: float,
-    steps: int,
-    seed: int,
-) -> Image.Image:
-    return pipe(
-        prompt=prompt,
-        image=source_image,
-        strength=strength,
-        guidance_scale=guidance,
-        num_inference_steps=steps,
-        generator=torch.Generator(device=pipe.device).manual_seed(seed),
-    ).images[0]
-
-
 def main() -> None:
     args = parse_args()
     input_dir = Path(args.input_dir).resolve()
     output_root = Path(args.output_root).resolve()
     lora_path = Path(args.lora_path).resolve()
+    project_root = Path(__file__).resolve().parent.parent
+    flux_repo_path = resolve_flux_repo(args.flux_repo, project_root)
+    FluxPipeline, LoRANetwork, calculate_shift_fn, retrieve_timesteps_fn = import_flux_components(flux_repo_path)
+    dtype = torch.bfloat16
 
     if not input_dir.exists():
         raise FileNotFoundError(f"Missing input directory: {input_dir}")
@@ -421,13 +590,58 @@ def main() -> None:
         raise FileNotFoundError(f"No images found in {input_dir}")
 
     output_root.mkdir(parents=True, exist_ok=True)
-
-    pipe = FluxImg2ImgPipeline.from_pretrained(
+    tokenizer, tokenizer_2, text_encoder, text_encoder_2 = load_text_encoders(args.model_path, args.device, dtype)
+    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
         args.model_path,
-        torch_dtype=torch.bfloat16,
+        subfolder="scheduler",
+        torch_dtype=dtype,
     )
-    pipe.to(args.device)
-    pipe.load_lora_weights(str(lora_path), adapter_name="gaze")
+    vae = AutoencoderKL.from_pretrained(
+        args.model_path,
+        subfolder="vae",
+        torch_dtype=dtype,
+    ).to(args.device)
+    transformer = FluxTransformer2DModel.from_pretrained(
+        args.model_path,
+        subfolder="transformer",
+        torch_dtype=dtype,
+    ).to(args.device)
+    vae.requires_grad_(False)
+    transformer.requires_grad_(False)
+    vae.eval()
+    transformer.eval()
+
+    pipe = FluxPipeline(
+        scheduler,
+        vae,
+        text_encoder,
+        tokenizer,
+        text_encoder_2,
+        tokenizer_2,
+        transformer,
+    )
+    prompt_embeds, pooled_prompt_embeds, _ = pipe.encode_prompt(
+        prompt=args.prompt,
+        prompt_2=args.prompt,
+        device=args.device,
+        num_images_per_prompt=1,
+        max_sequence_length=512,
+    )
+    pipe.text_encoder.to("cpu")
+    pipe.text_encoder_2.to("cpu")
+    torch.cuda.empty_cache()
+
+    lora_state = load_file(str(lora_path))
+    lora_rank, lora_alpha = infer_lora_hyperparams(lora_state)
+    network = LoRANetwork(
+        transformer,
+        rank=lora_rank,
+        multiplier=1.0,
+        alpha=lora_alpha,
+        train_method="xattn",
+        save_dir=str(output_root),
+    ).to(args.device, dtype=dtype)
+    network.load_state_dict(lora_state, strict=False)
 
     max_abs_scale = max(abs(scale) for scale in args.scales) if args.scales else 1.0
 
@@ -467,15 +681,24 @@ def main() -> None:
             Image.fromarray((eye_mask_full * 255.0).astype(np.uint8), mode="L").save(sample_dir / "eye_mask.png")
 
         for scale in args.scales:
-            pipe.set_adapters(["gaze"], adapter_weights=[scale])
             generated = generate_crop(
                 pipe=pipe,
+                network=network,
+                calculate_shift_fn=calculate_shift_fn,
+                retrieve_timesteps_fn=retrieve_timesteps_fn,
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
                 source_image=model_source,
-                prompt=args.prompt,
-                strength=args.strength,
+                scale=scale,
+                training_scale_max=args.training_scale_max,
+                user_scale_max=args.user_scale_max,
                 guidance=args.guidance,
                 steps=args.steps,
+                strength=args.strength,
                 seed=args.seed,
+                device=args.device,
+                dtype=dtype,
+                skip_slider_timestep_till=args.skip_slider_timestep_till,
             )
             generated = generated.resize(work_source.size, Image.LANCZOS)
             generated_rgb = np.array(generated)
