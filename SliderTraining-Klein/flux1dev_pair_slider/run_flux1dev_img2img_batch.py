@@ -656,6 +656,7 @@ def main() -> None:
         tokenizer_2,
         transformer,
     )
+    pipe.to(args.device)
     prompt_embeds, pooled_prompt_embeds, _ = pipe.encode_prompt(
         prompt=args.prompt,
         prompt_2=args.prompt,
@@ -663,9 +664,6 @@ def main() -> None:
         num_images_per_prompt=1,
         max_sequence_length=512,
     )
-    pipe.text_encoder.to("cpu")
-    pipe.text_encoder_2.to("cpu")
-    torch.cuda.empty_cache()
 
     lora_state = load_file(str(lora_path))
     lora_rank, lora_alpha = infer_lora_hyperparams(lora_state)
