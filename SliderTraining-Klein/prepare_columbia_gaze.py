@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import re
@@ -305,6 +306,47 @@ def load_text_corner_annotation_file(path: Path, text: str) -> dict[str, list[tu
     return point_map
 
 
+def load_table_corner_annotation_file(path: Path, text: str) -> dict[str, list[tuple[float, float]]]:
+    point_map: dict[str, list[tuple[float, float]]] = {}
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return point_map
+
+    sample = lines[0]
+    delimiter = "\t" if "\t" in sample else ","
+    reader = csv.DictReader(lines, delimiter=delimiter)
+    fieldnames = {field.strip().upper(): field for field in (reader.fieldnames or [])}
+
+    image_field = fieldnames.get("IMAGE")
+    expected_fields = [
+        fieldnames.get("RIGHT_EYE_IN_X"),
+        fieldnames.get("RIGHT_EYE_IN_Y"),
+        fieldnames.get("RIGHT_EYE_OUT_X"),
+        fieldnames.get("RIGHT_EYE_OUT_Y"),
+        fieldnames.get("LEFT_EYE_IN_X"),
+        fieldnames.get("LEFT_EYE_IN_Y"),
+        fieldnames.get("LEFT_EYE_OUT_X"),
+        fieldnames.get("LEFT_EYE_OUT_Y"),
+    ]
+    if image_field is None or any(field is None for field in expected_fields):
+        return point_map
+
+    for row in reader:
+        raw_key = row.get(image_field, "").strip()
+        if not raw_key:
+            continue
+        try:
+            numeric = [float(row[field].strip()) for field in expected_fields]
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        points = [
+            (numeric[index], numeric[index + 1])
+            for index in range(0, len(numeric), 2)
+        ]
+        merge_point_map(point_map, raw_key, points)
+    return point_map
+
+
 def load_corner_annotations(corner_root: Path) -> dict[str, list[tuple[float, float]]]:
     point_map: dict[str, list[tuple[float, float]]] = {}
     if not corner_root.exists():
@@ -317,7 +359,10 @@ def load_corner_annotations(corner_root: Path) -> dict[str, list[tuple[float, fl
         suffix = path.suffix.lower()
         if suffix in text_suffixes:
             text = sanitize_text(read_text_robust(path))
-            point_map.update(load_text_corner_annotation_file(path, text))
+            table_points = {}
+            if suffix in {".csv", ".tsv"}:
+                table_points = load_table_corner_annotation_file(path, text)
+            point_map.update(table_points or load_text_corner_annotation_file(path, text))
             continue
         if suffix == ".json":
             payload = json.loads(read_text_robust(path))
