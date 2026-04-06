@@ -139,7 +139,8 @@ class DifferentiableGazeLoss(nn.Module):
             )
 
         probs = F.softmax(yaw_logits.float(), dim=-1)
-        return probs @ self.angle_bins
+        angle_bins = self.angle_bins.to(device=probs.device, dtype=probs.dtype)
+        return probs @ angle_bins
 
     def predict_yaw(self, face_crop: torch.Tensor) -> torch.Tensor:
         x = F.interpolate(face_crop, size=(448, 448), mode="bilinear", align_corners=False)
