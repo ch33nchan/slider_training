@@ -41,7 +41,7 @@ def _remap_official_l2cs_keys(state_dict: dict[str, torch.Tensor]) -> dict[str, 
             remapped[key.replace("fc_pitch_gaze.", "fc_pitch.")] = value
             continue
         if key.startswith(("conv1.", "bn1.", "layer1.", "layer2.", "layer3.", "layer4.")):
-            remapped[key] = value
+            remapped[f"backbone.{key}"] = value
             continue
     return remapped
 
