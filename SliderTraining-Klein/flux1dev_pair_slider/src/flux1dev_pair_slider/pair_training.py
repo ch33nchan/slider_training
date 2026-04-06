@@ -397,8 +397,14 @@ def plot_loss(losses: list[float], save_path: Path) -> None:
     plt.close()
 
 
-def train_pair_slider(config_path: str, flux_repo: Optional[str] = None) -> None:
+def train_pair_slider(
+    config_path: str,
+    flux_repo: Optional[str] = None,
+    overrides: Optional[list[str]] = None,
+) -> None:
     cfg = OmegaConf.load(config_path)
+    if overrides:
+        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
     config_dir = Path(config_path).resolve().parent
     project_root = config_dir.parent.parent.parent
     flux_repo_path = resolve_flux_repo(flux_repo, project_root)
