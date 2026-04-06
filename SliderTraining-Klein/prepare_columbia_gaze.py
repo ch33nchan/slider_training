@@ -162,6 +162,19 @@ def corner_key_variants(value: str) -> list[str]:
     add(normalized)
     add(path.name)
     add(path.stem)
+    stem_tokens = [token for token in re.split(r"[_\-/]+", path.stem) if token]
+    if stem_tokens:
+        add(stem_tokens[0])
+        if stem_tokens[0].isdigit():
+            token_int = int(stem_tokens[0])
+            add(str(token_int))
+            add(f"{token_int:03d}")
+    numeric_tokens = re.findall(r"\d+", path.stem)
+    if numeric_tokens:
+        add(numeric_tokens[0])
+        token_int = int(numeric_tokens[0])
+        add(str(token_int))
+        add(f"{token_int:03d}")
     if path.suffix:
         add(normalized[: -len(path.suffix)])
     for length in (2, 3, 4):
@@ -172,6 +185,24 @@ def corner_key_variants(value: str) -> list[str]:
             if tail.suffix:
                 add(str(tail)[: -len(tail.suffix)])
     return variants
+
+
+def subject_id_variants(subject_id: str) -> list[str]:
+    cleaned = subject_id.strip()
+    if not cleaned:
+        return []
+    variants = [cleaned]
+    if cleaned.isdigit():
+        as_int = int(cleaned)
+        variants.append(str(as_int))
+        variants.append(f"{as_int:03d}")
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for variant in variants:
+        if variant not in seen:
+            seen.add(variant)
+            deduped.append(variant)
+    return deduped
 
 
 def read_text_robust(path: Path) -> str:
@@ -606,7 +637,8 @@ def main() -> None:
         image = Image.open(item.path).convert("RGB")
         face_bbox_override = None
         eye_bbox_override = None
-        for corner_key in corner_key_variants(str(item.path)):
+        match_keys = corner_key_variants(str(item.path)) + subject_id_variants(item.subject_id)
+        for corner_key in match_keys:
             if corner_key in corner_map:
                 face_bbox_override, eye_bbox_override = bbox_from_eye_corners(corner_map[corner_key], *image.size)
                 corner_hits += 1
