@@ -173,7 +173,7 @@ def choose_level_pair(
         if choose_source_record(level_map, neutral_level) is not None and any(level in level_map for level in valid_levels)
     ]
     if not candidate_subjects:
-        raise ValueError("No subjects have both a source level and a target level for ETH-XGaze training.")
+        raise ValueError("No subjects have both a source level and a target level for metadata-driven gaze training.")
 
     subject_id = random.choice(candidate_subjects)
     level_map = grouped_records[subject_id]
@@ -637,7 +637,7 @@ def train_pair_slider(
     if metadata_mode:
         grouped_records = group_gaze_records(load_gaze_records(cfg))
         if not grouped_records:
-            raise ValueError("No ETH-XGaze records loaded from metadata.")
+            raise ValueError("No metadata-driven gaze records loaded from metadata.json.")
     else:
         pairs = load_pairs(cfg)
         if not pairs:

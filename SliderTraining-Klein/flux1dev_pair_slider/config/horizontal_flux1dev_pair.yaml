@@ -1,8 +1,8 @@
 pretrained_model_name_or_path: "/mnt/data1/models/base-models/black-forest-labs/FLUX.1-dev"
 device: "cuda:0"
 
-data_root: "data/eth_xgaze_5level"
-metadata_path: "data/eth_xgaze_5level/metadata.json"
+data_root: "data/columbia_5level"
+metadata_path: "data/columbia_5level/metadata.json"
 num_gaze_levels: 5
 training_scale_levels: [-2, -1, 0, 1, 2]
 neutral_level: 0
@@ -11,8 +11,8 @@ prompt: "portrait of a person"
 height: 512
 width: 512
 
-output_dir: "flux1dev_pair_slider/outputs_eth_xgaze_l2cs"
-slider_name: "gaze_horizontal_flux1dev_eth_xgaze_l2cs"
+output_dir: "flux1dev_pair_slider/outputs_columbia_l2cs"
+slider_name: "gaze_horizontal_flux1dev_columbia_l2cs"
 
 rank: 16
 alpha: 16
