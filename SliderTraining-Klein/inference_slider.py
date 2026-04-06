@@ -46,6 +46,17 @@ except ImportError:
     cv2 = None
 
 
+TRAINING_SCALE_MAX = 2.0
+USER_SCALE_MAX = 5.0
+
+
+def user_scale_to_lora(scale: float, training_scale_max: float, user_scale_max: float) -> float:
+    if user_scale_max <= 0:
+        raise ValueError("user_scale_max must be positive.")
+    clipped = max(-user_scale_max, min(user_scale_max, scale))
+    return clipped * (training_scale_max / user_scale_max)
+
+
 def _largest_box(boxes):
     if len(boxes) == 0:
         return None
@@ -477,11 +488,15 @@ def main():
     parser.add_argument(
         "--scales", type=float, nargs="+", default=[-5, -2.5, 0, 2.5, 5]
     )
+    parser.add_argument("--training_scale_max", type=float, default=TRAINING_SCALE_MAX,
+                        help="Maximum LoRA scale seen during training.")
+    parser.add_argument("--user_scale_max", type=float, default=USER_SCALE_MAX,
+                        help="Maximum user-facing scale value.")
     parser.add_argument("--num_steps", type=int, default=28)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--strength", type=float, default=0.25,
                         help="img2img strength 0-1: 0=no change, 1=full regen from noise")
-    parser.add_argument("--scale_multiplier", type=float, default=1.8,
+    parser.add_argument("--scale_multiplier", type=float, default=1.0,
                         help="Multiply each requested slider scale by this factor for stronger gaze edits.")
     parser.add_argument("--flip_direction", action="store_true",
                         help="Flip sign of slider scales if learned direction is reversed.")
@@ -645,7 +660,11 @@ def main():
 
     for scale in args.scales:
         print(f"\nScale: {scale}")
-        effective_scale = scale * args.scale_multiplier
+        effective_scale = user_scale_to_lora(
+            scale=scale,
+            training_scale_max=args.training_scale_max,
+            user_scale_max=args.user_scale_max,
+        ) * args.scale_multiplier
         if args.flip_direction:
             effective_scale = -effective_scale
         network.set_lora_slider(effective_scale)

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import random
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import matplotlib
 matplotlib.use("Agg")
@@ -29,6 +30,19 @@ class ImagePair:
     pos_path: str
     neutral_path: str
     mask_path: Optional[str]
+
+
+@dataclass(frozen=True)
+class GazeImageRecord:
+    subject_id: str
+    level: int
+    file_path: str
+    yaw_rad: float
+    pitch_rad: float
+    face_bbox: tuple[int, int, int, int]
+    eye_bbox: tuple[int, int, int, int]
+    image_width: int
+    image_height: int
 
 
 def resolve_flux_repo(flux_repo: Optional[str], project_root: Path) -> Path:
@@ -84,6 +98,92 @@ def load_pairs(cfg) -> list[ImagePair]:
         )
         for stem in stems
     ]
+
+
+def parse_xywh_bbox(value: Any, width: int, height: int) -> tuple[int, int, int, int]:
+    if isinstance(value, dict):
+        x = value.get("x", value.get("left", 0))
+        y = value.get("y", value.get("top", 0))
+        w = value.get("w", value.get("width", width))
+        h = value.get("h", value.get("height", height))
+        value = [x, y, w, h]
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        value = [0, 0, width, height]
+    x, y, w, h = [int(round(float(v))) for v in value]
+    x = max(0, min(x, width - 1))
+    y = max(0, min(y, height - 1))
+    w = max(1, min(w, width - x))
+    h = max(1, min(h, height - y))
+    return x, y, w, h
+
+
+def load_gaze_records(cfg) -> list[GazeImageRecord]:
+    metadata_path = Path(str(cfg.get("metadata_path", Path(str(cfg.data_root)) / "metadata.json"))).resolve()
+    data_root = Path(str(cfg.data_root)).resolve()
+    payload = json.loads(metadata_path.read_text())
+    items = payload["items"] if isinstance(payload, dict) and "items" in payload else payload
+    records: list[GazeImageRecord] = []
+    for item in items:
+        image_width = int(item.get("image_width", cfg.width))
+        image_height = int(item.get("image_height", cfg.height))
+        records.append(
+            GazeImageRecord(
+                subject_id=str(item["subject_id"]),
+                level=int(item["level"]),
+                file_path=str((data_root / item["file_path"]).resolve()),
+                yaw_rad=float(item["yaw_rad"]),
+                pitch_rad=float(item.get("pitch_rad", 0.0)),
+                face_bbox=parse_xywh_bbox(item.get("face_bbox"), image_width, image_height),
+                eye_bbox=parse_xywh_bbox(item.get("eye_bbox"), image_width, image_height),
+                image_width=image_width,
+                image_height=image_height,
+            )
+        )
+    return records
+
+
+def group_gaze_records(records: list[GazeImageRecord]) -> dict[str, dict[int, list[GazeImageRecord]]]:
+    grouped: dict[str, dict[int, list[GazeImageRecord]]] = {}
+    for record in records:
+        grouped.setdefault(record.subject_id, {}).setdefault(record.level, []).append(record)
+    return grouped
+
+
+def choose_source_record(level_map: dict[int, list[GazeImageRecord]], neutral_level: int = 0) -> Optional[GazeImageRecord]:
+    if neutral_level in level_map:
+        return random.choice(level_map[neutral_level])
+    if not level_map:
+        return None
+    closest_level = min(level_map.keys(), key=lambda level: abs(level - neutral_level))
+    return random.choice(level_map[closest_level])
+
+
+def choose_level_pair(
+    grouped_records: dict[str, dict[int, list[GazeImageRecord]]],
+    training_levels: list[int],
+    neutral_level: int = 0,
+) -> tuple[GazeImageRecord, GazeImageRecord, int]:
+    valid_levels = [level for level in training_levels if level != 0]
+    if not valid_levels:
+        raise ValueError("training_scale_levels must include at least one non-zero level.")
+
+    candidate_subjects = [
+        subject_id
+        for subject_id, level_map in grouped_records.items()
+        if choose_source_record(level_map, neutral_level) is not None and any(level in level_map for level in valid_levels)
+    ]
+    if not candidate_subjects:
+        raise ValueError("No subjects have both a source level and a target level for ETH-XGaze training.")
+
+    subject_id = random.choice(candidate_subjects)
+    level_map = grouped_records[subject_id]
+    source_record = choose_source_record(level_map, neutral_level)
+    available_levels = [level for level in valid_levels if level in level_map]
+    target_level = random.choice(available_levels)
+    target_record = random.choice(level_map[target_level])
+    if source_record is None:
+        raise ValueError("Failed to choose a source record.")
+    return source_record, target_record, target_level
 
 
 def load_rgb_tensor(path: str, width: int, height: int) -> tuple[torch.Tensor, Image.Image]:
@@ -182,6 +282,68 @@ def crop_and_resize_tensor(
         align_corners=False,
     )
     return resized.squeeze(0)
+
+
+def xywh_to_xyxy(bbox: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    x, y, w, h = bbox
+    return x, y, x + w, y + h
+
+
+def union_bbox(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    ax0, ay0, aw, ah = a
+    bx0, by0, bw, bh = b
+    ax1, ay1 = ax0 + aw, ay0 + ah
+    bx1, by1 = bx0 + bw, by0 + bh
+    x0 = min(ax0, bx0)
+    y0 = min(ay0, by0)
+    x1 = max(ax1, bx1)
+    y1 = max(ay1, by1)
+    return x0, y0, x1 - x0, y1 - y0
+
+
+def bbox_mask_tensor(
+    bbox: tuple[int, int, int, int],
+    width: int,
+    height: int,
+) -> torch.Tensor:
+    x, y, w, h = bbox
+    mask = torch.zeros((1, height, width), dtype=torch.float32)
+    x1 = min(width, x + w)
+    y1 = min(height, y + h)
+    mask[:, y:y1, x:x1] = 1.0
+    return mask
+
+
+def scale_bbox_to_tensor(
+    bbox: tuple[int, int, int, int],
+    src_width: int,
+    src_height: int,
+    dst_width: int,
+    dst_height: int,
+) -> tuple[int, int, int, int]:
+    x, y, w, h = bbox
+    sx = dst_width / float(src_width)
+    sy = dst_height / float(src_height)
+    scaled = (
+        int(round(x * sx)),
+        int(round(y * sy)),
+        max(1, int(round(w * sx))),
+        max(1, int(round(h * sy))),
+    )
+    return parse_xywh_bbox(scaled, dst_width, dst_height)
+
+
+def apply_saved_crop(
+    image_tensor: torch.Tensor,
+    bbox: tuple[int, int, int, int],
+    src_width: int,
+    src_height: int,
+) -> torch.Tensor:
+    _, _, dst_height, dst_width = image_tensor.shape
+    x, y, w, h = scale_bbox_to_tensor(bbox, src_width, src_height, dst_width, dst_height)
+    x1 = min(dst_width, x + w)
+    y1 = min(dst_height, y + h)
+    return image_tensor[:, :, y:y1, x:x1]
 
 
 def maybe_crop_to_eye_region(
@@ -407,11 +569,15 @@ def train_pair_slider(
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
     config_dir = Path(config_path).resolve().parent
     project_root = config_dir.parent.parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
     flux_repo_path = resolve_flux_repo(flux_repo, project_root)
     FluxPipeline, LoRANetwork = import_flux_components(flux_repo_path)
+    from utils.l2cs_loss import DifferentiableGazeLoss
 
     device = cfg.device
     dtype = torch.bfloat16
+    metadata_mode = bool(cfg.get("data_root"))
 
     output_dir = Path(cfg.output_dir).resolve()
     save_dir = output_dir / f"flux-{cfg.slider_name}"
@@ -465,9 +631,17 @@ def train_pair_slider(
     del text_encoder, text_encoder_2, tokenizer, tokenizer_2
     torch.cuda.empty_cache()
 
-    pairs = load_pairs(cfg)
-    if not pairs:
-        raise ValueError("No matched neg/pos/neutral image triplets found.")
+    grouped_records: Optional[dict[str, dict[int, list[GazeImageRecord]]]] = None
+    training_levels = [int(level) for level in cfg.get("training_scale_levels", [-2, -1, 0, 1, 2])]
+    neutral_level = int(cfg.get("neutral_level", 0))
+    if metadata_mode:
+        grouped_records = group_gaze_records(load_gaze_records(cfg))
+        if not grouped_records:
+            raise ValueError("No ETH-XGaze records loaded from metadata.")
+    else:
+        pairs = load_pairs(cfg)
+        if not pairs:
+            raise ValueError("No matched neg/pos/neutral image triplets found.")
 
     network = LoRANetwork(
         transformer,
@@ -479,6 +653,15 @@ def train_pair_slider(
     ).to(device, dtype=dtype)
     params = network.prepare_optimizer_params()
     optimizer = AdamW(params, lr=float(cfg.lr))
+    gaze_loss_module = None
+    if metadata_mode and float(cfg.get("gaze_geometry_weight", 0.0)) > 0.0:
+        gaze_loss_module = DifferentiableGazeLoss(
+            model_path=str(cfg.l2cs_model_path),
+            device=device,
+            num_bins=int(cfg.get("l2cs_num_bins", 90)),
+            angle_min_deg=float(cfg.get("l2cs_angle_min_deg", -42.0)),
+            angle_max_deg=float(cfg.get("l2cs_angle_max_deg", 42.0)),
+        )
 
     vae_scale_factor = 2 ** (len(vae.config.block_out_channels))
     guidance = build_guidance(transformer, 1, 3.5, device)
@@ -486,23 +669,52 @@ def train_pair_slider(
     progress = tqdm(range(int(cfg.max_train_steps)), desc="FLUX Pair Training")
 
     for step in progress:
-        pair = random.choice(pairs)
-        neg_tensor, _ = load_rgb_tensor(pair.neg_path, int(cfg.width), int(cfg.height))
-        pos_tensor, _ = load_rgb_tensor(pair.pos_path, int(cfg.width), int(cfg.height))
-        src_tensor, _ = load_rgb_tensor(pair.neutral_path, int(cfg.width), int(cfg.height))
-        mask_tensor = load_mask_tensor(pair.mask_path, int(cfg.width), int(cfg.height))
-        neg_tensor, pos_tensor, src_tensor, mask_tensor = maybe_crop_to_eye_region(
-            neg_tensor=neg_tensor,
-            pos_tensor=pos_tensor,
-            src_tensor=src_tensor,
-            mask_tensor=mask_tensor,
-            cfg=cfg,
-        )
+        latent_display = 0.0
+        geometry_display = 0.0
 
-        with torch.no_grad():
-            neg_latent = encode_vae_latents(vae, neg_tensor, dtype)
-            pos_latent = encode_vae_latents(vae, pos_tensor, dtype)
-            src_latent = encode_vae_latents(vae, src_tensor, dtype)
+        if metadata_mode:
+            assert grouped_records is not None
+            source_record, target_record, target_level = choose_level_pair(
+                grouped_records=grouped_records,
+                training_levels=training_levels,
+                neutral_level=neutral_level,
+            )
+            src_tensor, _ = load_rgb_tensor(source_record.file_path, int(cfg.width), int(cfg.height))
+            target_tensor, _ = load_rgb_tensor(target_record.file_path, int(cfg.width), int(cfg.height))
+            mask_tensor = bbox_mask_tensor(
+                union_bbox(source_record.eye_bbox, target_record.eye_bbox),
+                int(cfg.width),
+                int(cfg.height),
+            )
+            target_tensor, _, src_tensor, mask_tensor = maybe_crop_to_eye_region(
+                neg_tensor=target_tensor,
+                pos_tensor=target_tensor,
+                src_tensor=src_tensor,
+                mask_tensor=mask_tensor,
+                cfg=cfg,
+            )
+
+            with torch.no_grad():
+                src_latent = encode_vae_latents(vae, src_tensor, dtype)
+                target_latent = encode_vae_latents(vae, target_tensor, dtype)
+        else:
+            pair = random.choice(pairs)
+            neg_tensor, _ = load_rgb_tensor(pair.neg_path, int(cfg.width), int(cfg.height))
+            pos_tensor, _ = load_rgb_tensor(pair.pos_path, int(cfg.width), int(cfg.height))
+            src_tensor, _ = load_rgb_tensor(pair.neutral_path, int(cfg.width), int(cfg.height))
+            mask_tensor = load_mask_tensor(pair.mask_path, int(cfg.width), int(cfg.height))
+            neg_tensor, pos_tensor, src_tensor, mask_tensor = maybe_crop_to_eye_region(
+                neg_tensor=neg_tensor,
+                pos_tensor=pos_tensor,
+                src_tensor=src_tensor,
+                mask_tensor=mask_tensor,
+                cfg=cfg,
+            )
+
+            with torch.no_grad():
+                neg_latent = encode_vae_latents(vae, neg_tensor, dtype)
+                pos_latent = encode_vae_latents(vae, pos_tensor, dtype)
+                src_latent = encode_vae_latents(vae, src_tensor, dtype)
 
         u = compute_density_for_timestep_sampling(
             weighting_scheme=str(cfg.get("weighting_scheme", "none")),
@@ -516,143 +728,231 @@ def train_pair_slider(
         sigma = (timesteps.float() / float(scheduler.config.num_train_timesteps)).view(1, 1, 1, 1).to(device=device, dtype=dtype)
 
         noise = torch.randn_like(src_latent)
-        x_neg = (1.0 - sigma) * neg_latent + sigma * noise
-        x_pos = (1.0 - sigma) * pos_latent + sigma * noise
         x_src = (1.0 - sigma) * src_latent + sigma * noise
-
-        packed_neg = flux_pipeline._pack_latents(x_neg, 1, x_neg.shape[1], x_neg.shape[2], x_neg.shape[3])
-        packed_pos = flux_pipeline._pack_latents(x_pos, 1, x_pos.shape[1], x_pos.shape[2], x_pos.shape[3])
         packed_src = flux_pipeline._pack_latents(x_src, 1, x_src.shape[1], x_src.shape[2], x_src.shape[3])
         img_ids = flux_pipeline._prepare_latent_image_ids(1, x_src.shape[2], x_src.shape[3], device, dtype)
 
-        token_weights, bg_weights = build_mask_weights(
+        eye_weights, bg_weights = build_mask_weights(
             mask_tensor,
             latent_height=x_src.shape[2],
             latent_width=x_src.shape[3],
-            eye_weight=float(cfg.get("eye_region_weight", 1.0)),
-            non_eye_weight=float(cfg.get("non_eye_region_weight", 1.0)),
+            eye_weight=1.0,
+            non_eye_weight=0.0,
             device=device,
         )
 
-        with torch.no_grad():
-            src_pred_base = transformer(
-                hidden_states=packed_src,
-                timestep=timesteps / 1000,
-                guidance=guidance,
-                pooled_projections=pooled_prompt_embeds,
-                encoder_hidden_states=prompt_embeds,
-                txt_ids=text_ids,
-                img_ids=img_ids,
-                return_dict=False,
-            )[0]
-            neg_pred = transformer(
-                hidden_states=packed_neg,
-                timestep=timesteps / 1000,
-                guidance=guidance,
-                pooled_projections=pooled_prompt_embeds,
-                encoder_hidden_states=prompt_embeds,
-                txt_ids=text_ids,
-                img_ids=img_ids,
-                return_dict=False,
-            )[0]
-            pos_pred = transformer(
-                hidden_states=packed_pos,
-                timestep=timesteps / 1000,
-                guidance=guidance,
-                pooled_projections=pooled_prompt_embeds,
-                encoder_hidden_states=prompt_embeds,
-                txt_ids=text_ids,
-                img_ids=img_ids,
-                return_dict=False,
-            )[0]
+        if metadata_mode:
+            x_target = (1.0 - sigma) * target_latent + sigma * noise
+            packed_target = flux_pipeline._pack_latents(x_target, 1, x_target.shape[1], x_target.shape[2], x_target.shape[3])
 
-            src_pred_base = unpack_prediction(src_pred_base, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
-            neg_pred = unpack_prediction(neg_pred, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
-            pos_pred = unpack_prediction(pos_pred, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
+            with torch.no_grad():
+                src_pred_base = transformer(
+                    hidden_states=packed_src,
+                    timestep=timesteps / 1000,
+                    guidance=guidance,
+                    pooled_projections=pooled_prompt_embeds,
+                    encoder_hidden_states=prompt_embeds,
+                    txt_ids=text_ids,
+                    img_ids=img_ids,
+                    return_dict=False,
+                )[0]
+                target_pred = transformer(
+                    hidden_states=packed_target,
+                    timestep=timesteps / 1000,
+                    guidance=guidance,
+                    pooled_projections=pooled_prompt_embeds,
+                    encoder_hidden_states=prompt_embeds,
+                    txt_ids=text_ids,
+                    img_ids=img_ids,
+                    return_dict=False,
+                )[0]
+                src_pred_base = unpack_prediction(src_pred_base, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
+                target_pred = unpack_prediction(target_pred, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
 
-        direction = 0.5 * (pos_pred - neg_pred)
-        gt_fwd = normalize_to(src_pred_base, src_pred_base + float(cfg.eta) * direction)
-        gt_bwd = normalize_to(src_pred_base, src_pred_base - float(cfg.eta) * direction)
-        target_fwd_delta = gt_fwd - src_pred_base
-        target_bwd_delta = gt_bwd - src_pred_base
+            optimizer.zero_grad(set_to_none=True)
+            network.set_lora_slider(float(target_level))
+            with network:
+                pred = transformer(
+                    hidden_states=packed_src,
+                    timestep=timesteps / 1000,
+                    guidance=guidance,
+                    pooled_projections=pooled_prompt_embeds,
+                    encoder_hidden_states=prompt_embeds,
+                    txt_ids=text_ids,
+                    img_ids=img_ids,
+                    return_dict=False,
+                )[0]
+            pred = unpack_prediction(pred, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
 
-        optimizer.zero_grad(set_to_none=True)
-        loss_value = 0.0
-        bg_weight = float(cfg.get("bg_preserve_weight", 0.0))
-        geometry_weight = float(cfg.get("gaze_geometry_weight", 0.0))
+            target_delta = target_pred - src_pred_base
+            pred_delta = pred - src_pred_base
 
-        network.set_lora_slider(1.0)
-        with network:
-            pred_fwd = transformer(
-                hidden_states=packed_src,
-                timestep=timesteps / 1000,
-                guidance=guidance,
-                pooled_projections=pooled_prompt_embeds,
-                encoder_hidden_states=prompt_embeds,
-                txt_ids=text_ids,
-                img_ids=img_ids,
-                return_dict=False,
-            )[0]
-        pred_fwd = unpack_prediction(pred_fwd, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
-        pred_fwd_delta = pred_fwd - src_pred_base
-        loss_fwd = weighted_latent_mse(pred_fwd_delta, target_fwd_delta, token_weights)
-        if bg_weight > 0 and bg_weights is not None:
-            loss_fwd = loss_fwd + bg_weight * weighted_latent_mse(pred_fwd, src_pred_base, bg_weights)
-        geometry_fwd_value = 0.0
-        if geometry_weight > 0.0 and mask_tensor is not None:
-            pred_fwd_clean = predict_clean_latent(x_src, pred_fwd, sigma)
-            pred_fwd_image = decode_vae_latents(vae, pred_fwd_clean, dtype)
-            geometry_fwd = compute_gaze_geometry_loss(
-                pred_image=pred_fwd_image,
-                target_tensor=pos_tensor,
-                src_tensor=src_tensor,
-                mask_tensor=mask_tensor,
-                cfg=cfg,
-            )
-            loss_fwd = loss_fwd + geometry_weight * geometry_fwd
-            geometry_fwd_value = float(geometry_fwd.detach().item())
-        (0.5 * loss_fwd).backward()
-        loss_value += 0.5 * float(loss_fwd.detach().item())
+            latent_target_loss = weighted_latent_mse(pred_delta, target_delta, None)
+            eye_region_recon_loss = pred.new_tensor(0.0)
+            if eye_weights is not None:
+                eye_region_recon_loss = float(cfg.get("eye_region_weight", 0.0)) * weighted_latent_mse(pred_delta, target_delta, eye_weights)
+            non_eye_preserve_loss = pred.new_tensor(0.0)
+            if bg_weights is not None:
+                non_eye_preserve_loss = float(cfg.get("non_eye_preserve_weight", cfg.get("bg_preserve_weight", 0.0))) * weighted_latent_mse(pred, src_pred_base, bg_weights)
 
-        network.set_lora_slider(-1.0)
-        with network:
-            pred_bwd = transformer(
-                hidden_states=packed_src,
-                timestep=timesteps / 1000,
-                guidance=guidance,
-                pooled_projections=pooled_prompt_embeds,
-                encoder_hidden_states=prompt_embeds,
-                txt_ids=text_ids,
-                img_ids=img_ids,
-                return_dict=False,
-            )[0]
-        pred_bwd = unpack_prediction(pred_bwd, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
-        pred_bwd_delta = pred_bwd - src_pred_base
-        loss_bwd = weighted_latent_mse(pred_bwd_delta, target_bwd_delta, token_weights)
-        if bg_weight > 0 and bg_weights is not None:
-            loss_bwd = loss_bwd + bg_weight * weighted_latent_mse(pred_bwd, src_pred_base, bg_weights)
-        geometry_bwd_value = 0.0
-        if geometry_weight > 0.0 and mask_tensor is not None:
-            pred_bwd_clean = predict_clean_latent(x_src, pred_bwd, sigma)
-            pred_bwd_image = decode_vae_latents(vae, pred_bwd_clean, dtype)
-            geometry_bwd = compute_gaze_geometry_loss(
-                pred_image=pred_bwd_image,
-                target_tensor=neg_tensor,
-                src_tensor=src_tensor,
-                mask_tensor=mask_tensor,
-                cfg=cfg,
-            )
-            loss_bwd = loss_bwd + geometry_weight * geometry_bwd
-            geometry_bwd_value = float(geometry_bwd.detach().item())
-        (0.5 * loss_bwd).backward()
-        loss_value += 0.5 * float(loss_bwd.detach().item())
+            total_loss = latent_target_loss + eye_region_recon_loss + non_eye_preserve_loss
+            geometry_loss = pred.new_tensor(0.0)
+            if gaze_loss_module is not None:
+                pred_clean = predict_clean_latent(x_src, pred, sigma)
+                pred_image = decode_vae_latents(vae, pred_clean, dtype)
+                face_crop = apply_saved_crop(
+                    pred_image,
+                    target_record.face_bbox,
+                    target_record.image_width,
+                    target_record.image_height,
+                )
+                target_yaw = torch.tensor([target_record.yaw_rad], device=device, dtype=pred.dtype)
+                sigma_scalar = float(sigma.detach().float().mean().item())
+                geometry_weight = float(cfg.get("gaze_geometry_weight", 0.0)) * max(0.0, 1.0 - sigma_scalar)
+                geometry_loss = gaze_loss_module(face_crop, target_yaw)
+                total_loss = total_loss + geometry_weight * geometry_loss
 
-        optimizer.step()
+                direction_weight = float(cfg.get("gaze_direction_weight", 0.0))
+                if direction_weight > 0.0:
+                    pred_yaw = gaze_loss_module.predict_yaw(face_crop).to(device=target_yaw.device, dtype=target_yaw.dtype)
+                    target_sign = torch.sign(target_yaw)
+                    direction_margin = target_yaw.abs() * 0.5
+                    direction_loss = F.relu(direction_margin - pred_yaw * target_sign).mean()
+                    total_loss = total_loss + geometry_weight * direction_weight * direction_loss
+
+            total_loss.backward()
+            optimizer.step()
+
+            loss_value = float(total_loss.detach().item())
+            latent_display = float(latent_target_loss.detach().item())
+            geometry_display = float(geometry_loss.detach().item())
+        else:
+            x_neg = (1.0 - sigma) * neg_latent + sigma * noise
+            x_pos = (1.0 - sigma) * pos_latent + sigma * noise
+            packed_neg = flux_pipeline._pack_latents(x_neg, 1, x_neg.shape[1], x_neg.shape[2], x_neg.shape[3])
+            packed_pos = flux_pipeline._pack_latents(x_pos, 1, x_pos.shape[1], x_pos.shape[2], x_pos.shape[3])
+
+            with torch.no_grad():
+                src_pred_base = transformer(
+                    hidden_states=packed_src,
+                    timestep=timesteps / 1000,
+                    guidance=guidance,
+                    pooled_projections=pooled_prompt_embeds,
+                    encoder_hidden_states=prompt_embeds,
+                    txt_ids=text_ids,
+                    img_ids=img_ids,
+                    return_dict=False,
+                )[0]
+                neg_pred = transformer(
+                    hidden_states=packed_neg,
+                    timestep=timesteps / 1000,
+                    guidance=guidance,
+                    pooled_projections=pooled_prompt_embeds,
+                    encoder_hidden_states=prompt_embeds,
+                    txt_ids=text_ids,
+                    img_ids=img_ids,
+                    return_dict=False,
+                )[0]
+                pos_pred = transformer(
+                    hidden_states=packed_pos,
+                    timestep=timesteps / 1000,
+                    guidance=guidance,
+                    pooled_projections=pooled_prompt_embeds,
+                    encoder_hidden_states=prompt_embeds,
+                    txt_ids=text_ids,
+                    img_ids=img_ids,
+                    return_dict=False,
+                )[0]
+                src_pred_base = unpack_prediction(src_pred_base, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
+                neg_pred = unpack_prediction(neg_pred, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
+                pos_pred = unpack_prediction(pos_pred, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
+
+            direction = 0.5 * (pos_pred - neg_pred)
+            gt_fwd = normalize_to(src_pred_base, src_pred_base + float(cfg.eta) * direction)
+            gt_bwd = normalize_to(src_pred_base, src_pred_base - float(cfg.eta) * direction)
+            target_fwd_delta = gt_fwd - src_pred_base
+            target_bwd_delta = gt_bwd - src_pred_base
+
+            optimizer.zero_grad(set_to_none=True)
+            loss_value = 0.0
+            bg_weight = float(cfg.get("bg_preserve_weight", 0.0))
+            geometry_weight = float(cfg.get("gaze_geometry_weight", 0.0))
+
+            network.set_lora_slider(1.0)
+            with network:
+                pred_fwd = transformer(
+                    hidden_states=packed_src,
+                    timestep=timesteps / 1000,
+                    guidance=guidance,
+                    pooled_projections=pooled_prompt_embeds,
+                    encoder_hidden_states=prompt_embeds,
+                    txt_ids=text_ids,
+                    img_ids=img_ids,
+                    return_dict=False,
+                )[0]
+            pred_fwd = unpack_prediction(pred_fwd, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
+            pred_fwd_delta = pred_fwd - src_pred_base
+            loss_fwd = weighted_latent_mse(pred_fwd_delta, target_fwd_delta, eye_weights)
+            if bg_weight > 0 and bg_weights is not None:
+                loss_fwd = loss_fwd + bg_weight * weighted_latent_mse(pred_fwd, src_pred_base, bg_weights)
+            geometry_fwd_value = 0.0
+            if geometry_weight > 0.0 and mask_tensor is not None:
+                pred_fwd_clean = predict_clean_latent(x_src, pred_fwd, sigma)
+                pred_fwd_image = decode_vae_latents(vae, pred_fwd_clean, dtype)
+                geometry_fwd = compute_gaze_geometry_loss(
+                    pred_image=pred_fwd_image,
+                    target_tensor=pos_tensor,
+                    src_tensor=src_tensor,
+                    mask_tensor=mask_tensor,
+                    cfg=cfg,
+                )
+                loss_fwd = loss_fwd + geometry_weight * geometry_fwd
+                geometry_fwd_value = float(geometry_fwd.detach().item())
+            (0.5 * loss_fwd).backward()
+            loss_value += 0.5 * float(loss_fwd.detach().item())
+
+            network.set_lora_slider(-1.0)
+            with network:
+                pred_bwd = transformer(
+                    hidden_states=packed_src,
+                    timestep=timesteps / 1000,
+                    guidance=guidance,
+                    pooled_projections=pooled_prompt_embeds,
+                    encoder_hidden_states=prompt_embeds,
+                    txt_ids=text_ids,
+                    img_ids=img_ids,
+                    return_dict=False,
+                )[0]
+            pred_bwd = unpack_prediction(pred_bwd, flux_pipeline, int(cfg.height), int(cfg.width), vae_scale_factor)
+            pred_bwd_delta = pred_bwd - src_pred_base
+            loss_bwd = weighted_latent_mse(pred_bwd_delta, target_bwd_delta, eye_weights)
+            if bg_weight > 0 and bg_weights is not None:
+                loss_bwd = loss_bwd + bg_weight * weighted_latent_mse(pred_bwd, src_pred_base, bg_weights)
+            geometry_bwd_value = 0.0
+            if geometry_weight > 0.0 and mask_tensor is not None:
+                pred_bwd_clean = predict_clean_latent(x_src, pred_bwd, sigma)
+                pred_bwd_image = decode_vae_latents(vae, pred_bwd_clean, dtype)
+                geometry_bwd = compute_gaze_geometry_loss(
+                    pred_image=pred_bwd_image,
+                    target_tensor=neg_tensor,
+                    src_tensor=src_tensor,
+                    mask_tensor=mask_tensor,
+                    cfg=cfg,
+                )
+                loss_bwd = loss_bwd + geometry_weight * geometry_bwd
+                geometry_bwd_value = float(geometry_bwd.detach().item())
+            (0.5 * loss_bwd).backward()
+            loss_value += 0.5 * float(loss_bwd.detach().item())
+
+            optimizer.step()
+            latent_display = loss_value
+            geometry_display = 0.5 * (geometry_fwd_value + geometry_bwd_value)
 
         losses.append(loss_value)
         progress.set_postfix(
             loss=f"{loss_value:.6f}",
-            geo=f"{0.5 * (geometry_fwd_value + geometry_bwd_value):.4f}",
+            latent=f"{latent_display:.4f}",
+            geo=f"{geometry_display:.4f}",
         )
 
         if (step + 1) % int(cfg.sample_every) == 0:
