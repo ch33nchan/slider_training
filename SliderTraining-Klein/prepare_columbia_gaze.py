@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
+import re
 import shutil
 import urllib.request
 import zipfile
@@ -22,10 +24,14 @@ except ModuleNotFoundError:  # pragma: no cover - optional fallback
     cv2 = None
 
 
-CANDIDATE_URLS = [
+DATASET_URLS = [
+    "https://ceal.cs.columbia.edu/static/materials/columbiagaze/columbia_gaze_data_set.zip",
     "https://cave.cs.columbia.edu/old/databases/columbia_gaze/columbia_gaze.zip",
     "https://www.cs.columbia.edu/CAVE/databases/columbia_gaze/columbia_gaze.zip",
     "http://cave.cs.columbia.edu/old/databases/columbia_gaze/columbia_gaze.zip",
+]
+EYE_CORNER_URLS = [
+    "https://ceal.cs.columbia.edu/static/materials/columbiagaze/eye_corner_locations.zip",
 ]
 
 ANGLE_TO_LEVEL = {
@@ -55,7 +61,11 @@ class ColumbiaImage:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--zip-path", default="data/columbia_gaze.zip")
+    parser.add_argument("--zip-url", action="append", default=[])
     parser.add_argument("--extract-dir", default="data/columbia_gaze_raw")
+    parser.add_argument("--corner-zip-path", default="data/eye_corner_locations.zip")
+    parser.add_argument("--corner-zip-url", action="append", default=[])
+    parser.add_argument("--corner-extract-dir", default="data/columbia_gaze_corners")
     parser.add_argument("--output-dir", default="data/columbia_5level")
     parser.add_argument("--size", type=int, default=512)
     parser.add_argument("--preferred-distance", default="2m")
@@ -63,6 +73,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--supplemental-extreme-yaw-deg", type=float, default=15.0)
     parser.add_argument("--force-download", action="store_true")
     parser.add_argument("--force-extract", action="store_true")
+    parser.add_argument("--force-corner-download", action="store_true")
+    parser.add_argument("--force-corner-extract", action="store_true")
     return parser.parse_args()
 
 
@@ -70,11 +82,11 @@ def level_token(level: int) -> str:
     return "0" if level == 0 else f"{level:+d}"
 
 
-def try_download(dest: Path) -> None:
+def try_download(dest: Path, urls: list[str]) -> None:
     if dest.exists():
         dest.unlink()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    for url in CANDIDATE_URLS:
+    for url in urls:
         print(f"Trying {url}")
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -104,14 +116,14 @@ def try_download(dest: Path) -> None:
         except Exception:
             continue
     raise RuntimeError(
-        "Failed to download Columbia Gaze zip automatically. "
-        "Download it manually and place it at data/columbia_gaze.zip."
+        f"Failed to download archive automatically for {dest.name}. "
+        f"Download it manually and place it at {dest}."
     )
 
 
-def ensure_zip(zip_path: Path, force_download: bool) -> None:
+def ensure_zip(zip_path: Path, urls: list[str], force_download: bool) -> None:
     if force_download or not zip_path.exists() or not zipfile.is_zipfile(zip_path):
-        try_download(zip_path)
+        try_download(zip_path, urls=urls)
 
 
 def ensure_extract(zip_path: Path, extract_dir: Path, force_extract: bool) -> None:
@@ -122,6 +134,77 @@ def ensure_extract(zip_path: Path, extract_dir: Path, force_extract: bool) -> No
     extract_dir.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path, "r") as archive:
         archive.extractall(extract_dir)
+
+
+def normalize_corner_key(value: str) -> str:
+    name = Path(value).name
+    stem = Path(name).stem.lower()
+    return stem
+
+
+def parse_numeric_tokens(text: str) -> list[float]:
+    matches = re.findall(r"[-+]?\d*\.?\d+", text)
+    return [float(match) for match in matches]
+
+
+def parse_corner_line(line: str) -> tuple[Optional[str], list[tuple[float, float]]]:
+    stripped = line.strip()
+    if not stripped:
+        return None, []
+    image_match = re.search(r"([A-Za-z0-9_\-]+\.(?:jpg|jpeg|png))", stripped, flags=re.IGNORECASE)
+    image_key = normalize_corner_key(image_match.group(1)) if image_match else None
+    values = parse_numeric_tokens(stripped)
+    if len(values) < 4 or len(values) % 2 != 0:
+        return image_key, []
+    points = [(values[index], values[index + 1]) for index in range(0, len(values), 2)]
+    return image_key, points
+
+
+def merge_point_map(target: dict[str, list[tuple[float, float]]], key: Optional[str], points: list[tuple[float, float]]) -> None:
+    if key is None or not points:
+        return
+    target[key] = points
+
+
+def load_corner_annotations(corner_root: Path) -> dict[str, list[tuple[float, float]]]:
+    point_map: dict[str, list[tuple[float, float]]] = {}
+    if not corner_root.exists():
+        return point_map
+
+    text_suffixes = {".txt", ".csv", ".tsv", ".pts"}
+    for path in sorted(corner_root.rglob("*")):
+        if not path.is_file():
+            continue
+        suffix = path.suffix.lower()
+        if suffix in text_suffixes:
+            if suffix in {".csv", ".tsv"}:
+                delimiter = "\t" if suffix == ".tsv" else ","
+                with path.open("r", newline="") as handle:
+                    reader = csv.reader(handle, delimiter=delimiter)
+                    for row in reader:
+                        key, points = parse_corner_line(" ".join(row))
+                        merge_point_map(point_map, key, points)
+                continue
+            for line in path.read_text(errors="ignore").splitlines():
+                key, points = parse_corner_line(line)
+                merge_point_map(point_map, key, points)
+            continue
+        if suffix == ".json":
+            payload = json.loads(path.read_text())
+            if isinstance(payload, dict):
+                items = payload.items()
+            elif isinstance(payload, list):
+                items = enumerate(payload)
+            else:
+                continue
+            for raw_key, raw_value in items:
+                key = normalize_corner_key(str(raw_key)) if isinstance(raw_key, str) else None
+                values = raw_value if isinstance(raw_value, list) else raw_value.get("points", []) if isinstance(raw_value, dict) else []
+                numeric = [float(v) for v in values if isinstance(v, (int, float))]
+                if len(numeric) >= 4 and len(numeric) % 2 == 0:
+                    points = [(numeric[index], numeric[index + 1]) for index in range(0, len(numeric), 2)]
+                    merge_point_map(point_map, key, points)
+    return point_map
 
 
 def parse_horizontal_token(token: str) -> Optional[int]:
@@ -214,6 +297,50 @@ def default_eye_bbox(face_bbox: tuple[int, int, int, int]) -> tuple[int, int, in
     return eye_x, eye_y, eye_w, eye_h
 
 
+def bbox_from_eye_corners(
+    points: list[tuple[float, float]],
+    width: int,
+    height: int,
+) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    min_x = min(xs)
+    max_x = max(xs)
+    min_y = min(ys)
+    max_y = max(ys)
+
+    eye_w = max_x - min_x
+    eye_h = max_y - min_y
+    pad_x = max(8.0, eye_w * 0.35)
+    pad_y = max(6.0, eye_h * 1.4)
+    eye_bbox = clamp_bbox(
+        (
+            int(round(min_x - pad_x)),
+            int(round(min_y - pad_y * 0.55)),
+            int(round(eye_w + 2 * pad_x)),
+            int(round(eye_h + pad_y)),
+        ),
+        width,
+        height,
+    )
+
+    face_w = eye_bbox[2] * 1.9
+    face_h = face_w * 1.15
+    face_x = eye_bbox[0] + eye_bbox[2] * 0.5 - face_w * 0.5
+    face_y = eye_bbox[1] + eye_bbox[3] * 0.35 - face_h * 0.35
+    face_bbox = clamp_bbox(
+        (
+            int(round(face_x)),
+            int(round(face_y)),
+            int(round(face_w)),
+            int(round(face_h)),
+        ),
+        width,
+        height,
+    )
+    return face_bbox, eye_bbox
+
+
 def detect_face_bbox(image: Image.Image, detector: Any) -> tuple[int, int, int, int]:
     width, height = image.size
     if detector is None:
@@ -260,10 +387,12 @@ def save_entry(
     dataset_name: str,
     metadata: list[dict[str, Any]],
     size: int,
+    face_bbox_override: Optional[tuple[int, int, int, int]] = None,
+    eye_bbox_override: Optional[tuple[int, int, int, int]] = None,
 ) -> None:
     src_width, src_height = image.size
-    face_bbox = detect_face_bbox(image, detector)
-    eye_bbox = default_eye_bbox(face_bbox)
+    face_bbox = face_bbox_override or detect_face_bbox(image, detector)
+    eye_bbox = eye_bbox_override or default_eye_bbox(face_bbox)
 
     resized = image.resize((size, size), Image.LANCZOS)
     face_bbox_scaled = scale_bbox(face_bbox, src_width, src_height, size, size)
@@ -345,13 +474,21 @@ def main() -> None:
     args = parse_args()
     zip_path = Path(args.zip_path).resolve()
     extract_dir = Path(args.extract_dir).resolve()
+    corner_zip_path = Path(args.corner_zip_path).resolve()
+    corner_extract_dir = Path(args.corner_extract_dir).resolve()
     output_dir = Path(args.output_dir).resolve()
     supplemental_triplet_dir = Path(args.supplemental_triplet_dir).resolve()
 
-    ensure_zip(zip_path, force_download=args.force_download)
+    dataset_urls = args.zip_url or DATASET_URLS
+    corner_urls = args.corner_zip_url or EYE_CORNER_URLS
+
+    ensure_zip(zip_path, urls=dataset_urls, force_download=args.force_download)
     ensure_extract(zip_path, extract_dir, force_extract=args.force_extract)
+    ensure_zip(corner_zip_path, urls=corner_urls, force_download=args.force_corner_download)
+    ensure_extract(corner_zip_path, corner_extract_dir, force_extract=args.force_corner_extract)
 
     detector = build_face_detector()
+    corner_map = load_corner_annotations(corner_extract_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     for level in (-2, -1, 0, 1, 2):
         (output_dir / f"level_{level_token(level)}").mkdir(parents=True, exist_ok=True)
@@ -360,9 +497,16 @@ def main() -> None:
     chosen = choose_subject_images(discovered, preferred_distance=args.preferred_distance)
 
     metadata: list[dict[str, Any]] = []
+    corner_hits = 0
     for item in tqdm(chosen, desc="Preparing Columbia Gaze"):
         level = ANGLE_TO_LEVEL[item.horizontal_deg]
         image = Image.open(item.path).convert("RGB")
+        face_bbox_override = None
+        eye_bbox_override = None
+        corner_key = normalize_corner_key(item.path.name)
+        if corner_key in corner_map:
+            face_bbox_override, eye_bbox_override = bbox_from_eye_corners(corner_map[corner_key], *image.size)
+            corner_hits += 1
         save_entry(
             image=image,
             output_dir=output_dir,
@@ -373,6 +517,8 @@ def main() -> None:
             dataset_name="columbia_gaze",
             metadata=metadata,
             size=args.size,
+            face_bbox_override=face_bbox_override,
+            eye_bbox_override=eye_bbox_override,
         )
 
     supplemental_subjects = append_supplemental_triplets(
@@ -400,6 +546,8 @@ def main() -> None:
             },
             "supplemental_subjects": supplemental_subjects,
             "supplemental_triplet_dir": str(supplemental_triplet_dir) if supplemental_triplet_dir.exists() else None,
+            "eye_corner_annotations_used": corner_hits,
+            "eye_corner_annotation_root": str(corner_extract_dir),
         },
     }
     metadata_path = output_dir / "metadata.json"
