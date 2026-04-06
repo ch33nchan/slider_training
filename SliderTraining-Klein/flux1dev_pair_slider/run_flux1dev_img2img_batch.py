@@ -6,8 +6,12 @@ from typing import Iterable, List, Sequence
 
 import numpy as np
 import torch
-from diffusers import FluxImg2ImgPipeline
 from PIL import Image, ImageDraw, ImageFilter
+
+try:
+    from diffusers import FluxImg2ImgPipeline
+except ImportError:
+    from diffusers.pipelines.flux.pipeline_flux_img2img import FluxImg2ImgPipeline
 
 try:
     import cv2
