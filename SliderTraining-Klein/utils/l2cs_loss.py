@@ -41,7 +41,7 @@ def _remap_official_l2cs_keys(state_dict: dict[str, torch.Tensor]) -> dict[str, 
             remapped[key.replace("fc_pitch_gaze.", "fc_pitch.")] = value
             continue
         if key.startswith(("conv1.", "bn1.", "layer1.", "layer2.", "layer3.", "layer4.")):
-            remapped[f"features.{key}"] = value
+            remapped[key] = value
             continue
     return remapped
 
@@ -50,12 +50,14 @@ class L2CSBackbone(nn.Module):
     def __init__(self, num_bins: int = 90) -> None:
         super().__init__()
         backbone = resnet50(weights=None)
-        self.features = nn.Sequential(*list(backbone.children())[:-1])
-        self.fc_yaw = nn.Linear(backbone.fc.in_features, num_bins)
-        self.fc_pitch = nn.Linear(backbone.fc.in_features, num_bins)
+        in_features = backbone.fc.in_features
+        backbone.fc = nn.Identity()
+        self.backbone = backbone
+        self.fc_yaw = nn.Linear(in_features, num_bins)
+        self.fc_pitch = nn.Linear(in_features, num_bins)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        features = self.features(x).flatten(1)
+        features = self.backbone(x)
         return self.fc_yaw(features), self.fc_pitch(features)
 
 
