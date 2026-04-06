@@ -31,6 +31,21 @@ def _strip_prefixes(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tens
     return cleaned
 
 
+def _remap_official_l2cs_keys(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    remapped: dict[str, torch.Tensor] = {}
+    for key, value in state_dict.items():
+        if key.startswith("fc_yaw_gaze."):
+            remapped[key.replace("fc_yaw_gaze.", "fc_yaw.")] = value
+            continue
+        if key.startswith("fc_pitch_gaze."):
+            remapped[key.replace("fc_pitch_gaze.", "fc_pitch.")] = value
+            continue
+        if key.startswith(("conv1.", "bn1.", "layer1.", "layer2.", "layer3.", "layer4.")):
+            remapped[f"features.{key}"] = value
+            continue
+    return remapped
+
+
 class L2CSBackbone(nn.Module):
     def __init__(self, num_bins: int = 90) -> None:
         super().__init__()
@@ -57,8 +72,11 @@ def load_l2cs_backbone(
 
     payload = torch.load(str(checkpoint_path), map_location=device)
     state_dict = _strip_prefixes(_unwrap_state_dict(payload))
+    if "fc_yaw_gaze.weight" in state_dict or "fc_pitch_gaze.weight" in state_dict:
+        state_dict = _remap_official_l2cs_keys(state_dict)
     model = L2CSBackbone(num_bins=num_bins)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    unexpected = [key for key in unexpected if not key.startswith("fc_finetune.")]
     if unexpected:
         raise ValueError(f"Unexpected keys in L2CS checkpoint: {unexpected}")
     if missing and not all(key.endswith(("num_batches_tracked",)) for key in missing):
