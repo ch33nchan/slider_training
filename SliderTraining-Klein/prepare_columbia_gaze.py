@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import re
@@ -12,7 +11,7 @@ import urllib.request
 import zipfile
 from collections import defaultdict
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
 import numpy as np
@@ -70,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="data/columbia_5level")
     parser.add_argument("--size", type=int, default=512)
     parser.add_argument("--preferred-distance", default="2m")
-    parser.add_argument("--supplemental-triplet-dir", default="../gaze_pairs/gaze_pairs")
+    parser.add_argument("--supplemental-triplet-dir", default=None)
     parser.add_argument("--supplemental-extreme-yaw-deg", type=float, default=15.0)
     parser.add_argument("--force-download", action="store_true")
     parser.add_argument("--force-extract", action="store_true")
@@ -138,9 +137,41 @@ def ensure_extract(zip_path: Path, extract_dir: Path, force_extract: bool) -> No
 
 
 def normalize_corner_key(value: str) -> str:
-    name = Path(value).name
-    stem = Path(name).stem.lower()
+    normalized = sanitize_text(value).replace("\\", "/").strip().strip("\"'")
+    name = PurePosixPath(normalized).name
+    stem = PurePosixPath(name).stem.lower()
     return stem
+
+
+def corner_key_variants(value: str) -> list[str]:
+    normalized = sanitize_text(value).replace("\\", "/").strip().strip("\"'")
+    normalized = re.sub(r"/+", "/", normalized).lstrip("./").lower()
+    if not normalized:
+        return []
+
+    path = PurePosixPath(normalized)
+    variants: list[str] = []
+    seen: set[str] = set()
+
+    def add(candidate: str) -> None:
+        candidate = candidate.strip().strip("\"'").lower()
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            variants.append(candidate)
+
+    add(normalized)
+    add(path.name)
+    add(path.stem)
+    if path.suffix:
+        add(normalized[: -len(path.suffix)])
+    for length in (2, 3, 4):
+        if len(path.parts) >= length:
+            add("/".join(path.parts[-length:]))
+            tail = PurePosixPath("/".join(path.parts[-length:]))
+            add(tail.stem)
+            if tail.suffix:
+                add(str(tail)[: -len(tail.suffix)])
+    return variants
 
 
 def read_text_robust(path: Path) -> str:
@@ -170,17 +201,77 @@ def parse_corner_line(line: str) -> tuple[Optional[str], list[tuple[float, float
         return None, []
     image_match = re.search(r"([A-Za-z0-9_\-]+\.(?:jpg|jpeg|png))", stripped, flags=re.IGNORECASE)
     image_key = normalize_corner_key(image_match.group(1)) if image_match else None
-    values = parse_numeric_tokens(stripped)
+    numeric_source = stripped
+    if image_match is not None:
+        numeric_source = f"{stripped[:image_match.start()]} {stripped[image_match.end():]}"
+    values = parse_numeric_tokens(numeric_source)
     if len(values) < 4 or len(values) % 2 != 0:
         return image_key, []
     points = [(values[index], values[index + 1]) for index in range(0, len(values), 2)]
     return image_key, points
 
 
-def merge_point_map(target: dict[str, list[tuple[float, float]]], key: Optional[str], points: list[tuple[float, float]]) -> None:
-    if key is None or not points:
+def merge_point_map(
+    target: dict[str, list[tuple[float, float]]],
+    keys: Optional[str | list[str]],
+    points: list[tuple[float, float]],
+) -> None:
+    if keys is None or not points:
         return
-    target[key] = points
+    if isinstance(keys, str):
+        key_iterable = corner_key_variants(keys)
+    else:
+        key_iterable = []
+        for key in keys:
+            key_iterable.extend(corner_key_variants(key))
+    for key in key_iterable:
+        target[key] = points
+
+
+def parse_points_blob(text: str) -> list[tuple[float, float]]:
+    candidate_blobs = [text]
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate_blobs.insert(0, text[start + 1 : end])
+
+    for blob in candidate_blobs:
+        per_line_points: list[tuple[float, float]] = []
+        for line in blob.splitlines():
+            values = parse_numeric_tokens(line)
+            if len(values) == 2:
+                per_line_points.append((values[0], values[1]))
+        if len(per_line_points) >= 2:
+            return per_line_points
+
+        values = parse_numeric_tokens(blob)
+        for offset in range(min(4, max(0, len(values) - 3))):
+            trimmed = values[offset:]
+            if len(trimmed) >= 4 and len(trimmed) % 2 == 0:
+                return [
+                    (trimmed[index], trimmed[index + 1])
+                    for index in range(0, len(trimmed), 2)
+                ]
+    return []
+
+
+def load_text_corner_annotation_file(path: Path, text: str) -> dict[str, list[tuple[float, float]]]:
+    point_map: dict[str, list[tuple[float, float]]] = {}
+    found_explicit_keys = False
+    for line in text.splitlines():
+        key, points = parse_corner_line(line)
+        if key is None or not points:
+            continue
+        merge_point_map(point_map, key, points)
+        found_explicit_keys = True
+
+    if found_explicit_keys:
+        return point_map
+
+    points = parse_points_blob(text)
+    if points:
+        merge_point_map(point_map, str(path), points)
+    return point_map
 
 
 def load_corner_annotations(corner_root: Path) -> dict[str, list[tuple[float, float]]]:
@@ -195,16 +286,7 @@ def load_corner_annotations(corner_root: Path) -> dict[str, list[tuple[float, fl
         suffix = path.suffix.lower()
         if suffix in text_suffixes:
             text = sanitize_text(read_text_robust(path))
-            if suffix in {".csv", ".tsv"}:
-                delimiter = "\t" if suffix == ".tsv" else ","
-                reader = csv.reader(text.splitlines(), delimiter=delimiter)
-                for row in reader:
-                    key, points = parse_corner_line(" ".join(row))
-                    merge_point_map(point_map, key, points)
-                continue
-            for line in text.splitlines():
-                key, points = parse_corner_line(line)
-                merge_point_map(point_map, key, points)
+            point_map.update(load_text_corner_annotation_file(path, text))
             continue
         if suffix == ".json":
             payload = json.loads(read_text_robust(path))
@@ -215,7 +297,7 @@ def load_corner_annotations(corner_root: Path) -> dict[str, list[tuple[float, fl
             else:
                 continue
             for raw_key, raw_value in items:
-                key = normalize_corner_key(str(raw_key)) if isinstance(raw_key, str) else None
+                key = str(raw_key) if isinstance(raw_key, str) else None
                 values = raw_value if isinstance(raw_value, list) else raw_value.get("points", []) if isinstance(raw_value, dict) else []
                 numeric = [float(v) for v in values if isinstance(v, (int, float))]
                 if len(numeric) >= 4 and len(numeric) % 2 == 0:
@@ -440,12 +522,12 @@ def save_entry(
 def append_supplemental_triplets(
     metadata: list[dict[str, Any]],
     output_dir: Path,
-    triplet_dir: Path,
+    triplet_dir: Optional[Path],
     detector: Any,
     size: int,
     extreme_yaw_deg: float,
 ) -> int:
-    if not triplet_dir.exists():
+    if triplet_dir is None or not triplet_dir.exists():
         return 0
 
     grouped: dict[str, dict[str, Path]] = defaultdict(dict)
@@ -494,7 +576,11 @@ def main() -> None:
     corner_zip_path = Path(args.corner_zip_path).resolve()
     corner_extract_dir = Path(args.corner_extract_dir).resolve()
     output_dir = Path(args.output_dir).resolve()
-    supplemental_triplet_dir = Path(args.supplemental_triplet_dir).resolve()
+    supplemental_triplet_dir = (
+        Path(args.supplemental_triplet_dir).resolve()
+        if args.supplemental_triplet_dir
+        else None
+    )
 
     dataset_urls = args.zip_url or DATASET_URLS
     corner_urls = args.corner_zip_url or EYE_CORNER_URLS
@@ -520,10 +606,11 @@ def main() -> None:
         image = Image.open(item.path).convert("RGB")
         face_bbox_override = None
         eye_bbox_override = None
-        corner_key = normalize_corner_key(item.path.name)
-        if corner_key in corner_map:
-            face_bbox_override, eye_bbox_override = bbox_from_eye_corners(corner_map[corner_key], *image.size)
-            corner_hits += 1
+        for corner_key in corner_key_variants(str(item.path)):
+            if corner_key in corner_map:
+                face_bbox_override, eye_bbox_override = bbox_from_eye_corners(corner_map[corner_key], *image.size)
+                corner_hits += 1
+                break
         save_entry(
             image=image,
             output_dir=output_dir,
@@ -562,7 +649,8 @@ def main() -> None:
                 "level_+2": 15,
             },
             "supplemental_subjects": supplemental_subjects,
-            "supplemental_triplet_dir": str(supplemental_triplet_dir) if supplemental_triplet_dir.exists() else None,
+            "supplemental_triplet_dir": str(supplemental_triplet_dir) if supplemental_triplet_dir is not None and supplemental_triplet_dir.exists() else None,
+            "eye_corner_annotation_entries": len(corner_map),
             "eye_corner_annotations_used": corner_hits,
             "eye_corner_annotation_root": str(corner_extract_dir),
         },
