@@ -441,8 +441,11 @@ def infer_lora_hyperparams(state_dict: dict[str, torch.Tensor]) -> tuple[int, fl
     rank = None
     alpha = None
     for key, value in state_dict.items():
-        if key.endswith(".lora_down.weight"):
+        if key.endswith(".lora_down.weight") or key.endswith(".lora_A.weight"):
             rank = int(value.shape[0])
+            break
+        if key.endswith(".lora_up.weight") or key.endswith(".lora_B.weight"):
+            rank = int(value.shape[1])
             break
     for key, value in state_dict.items():
         if key.endswith(".alpha"):
@@ -453,6 +456,39 @@ def infer_lora_hyperparams(state_dict: dict[str, torch.Tensor]) -> tuple[int, fl
     if alpha is None:
         alpha = float(rank)
     return rank, alpha
+
+
+def remap_peft_lora_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    network_state_keys: set[str],
+) -> dict[str, torch.Tensor]:
+    if any(key in network_state_keys for key in state_dict):
+        return state_dict
+
+    remapped: dict[str, torch.Tensor] = {}
+    for key, value in state_dict.items():
+        if key.endswith(".alpha"):
+            continue
+
+        if key.endswith(".lora_A.weight"):
+            prefix = key[: -len(".lora_A.weight")]
+            suffix = ".lora_down.weight"
+        elif key.endswith(".lora_B.weight"):
+            prefix = key[: -len(".lora_B.weight")]
+            suffix = ".lora_up.weight"
+        else:
+            continue
+
+        if prefix.startswith("transformer."):
+            prefix = prefix[len("transformer.") :]
+        module_key = prefix.replace(".", "_")
+        new_key = f"lora_unet_{module_key}{suffix}"
+        if new_key in network_state_keys:
+            remapped[new_key] = value
+
+    if not remapped:
+        return state_dict
+    return remapped
 
 
 def prepare_packed_source_latents(pipe, source_image: Image.Image, device: str, dtype: torch.dtype):
@@ -641,6 +677,7 @@ def main() -> None:
         train_method="xattn",
         save_dir=str(output_root),
     ).to(args.device, dtype=dtype)
+    lora_state = remap_peft_lora_state_dict(lora_state, set(network.state_dict().keys()))
     network.load_state_dict(lora_state, strict=False)
 
     max_abs_scale = max(abs(scale) for scale in args.scales) if args.scales else 1.0
