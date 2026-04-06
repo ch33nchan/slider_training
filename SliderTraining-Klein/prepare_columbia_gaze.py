@@ -7,6 +7,7 @@ import json
 import math
 import re
 import shutil
+import unicodedata
 import urllib.request
 import zipfile
 from collections import defaultdict
@@ -142,6 +143,22 @@ def normalize_corner_key(value: str) -> str:
     return stem
 
 
+def read_text_robust(path: Path) -> str:
+    raw = path.read_bytes()
+    for encoding in ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1", errors="ignore")
+
+
+def sanitize_text(text: str) -> str:
+    cleaned = text.replace("\x00", " ")
+    cleaned = unicodedata.normalize("NFKC", cleaned)
+    return cleaned
+
+
 def parse_numeric_tokens(text: str) -> list[float]:
     matches = re.findall(r"[-+]?\d*\.?\d+", text)
     return [float(match) for match in matches]
@@ -177,20 +194,20 @@ def load_corner_annotations(corner_root: Path) -> dict[str, list[tuple[float, fl
             continue
         suffix = path.suffix.lower()
         if suffix in text_suffixes:
+            text = sanitize_text(read_text_robust(path))
             if suffix in {".csv", ".tsv"}:
                 delimiter = "\t" if suffix == ".tsv" else ","
-                with path.open("r", newline="") as handle:
-                    reader = csv.reader(handle, delimiter=delimiter)
-                    for row in reader:
-                        key, points = parse_corner_line(" ".join(row))
-                        merge_point_map(point_map, key, points)
+                reader = csv.reader(text.splitlines(), delimiter=delimiter)
+                for row in reader:
+                    key, points = parse_corner_line(" ".join(row))
+                    merge_point_map(point_map, key, points)
                 continue
-            for line in path.read_text(errors="ignore").splitlines():
+            for line in text.splitlines():
                 key, points = parse_corner_line(line)
                 merge_point_map(point_map, key, points)
             continue
         if suffix == ".json":
-            payload = json.loads(path.read_text())
+            payload = json.loads(read_text_robust(path))
             if isinstance(payload, dict):
                 items = payload.items()
             elif isinstance(payload, list):
