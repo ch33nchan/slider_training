@@ -10,8 +10,8 @@ prompt: "portrait of a person"
 height: 1024
 width: 1024
 
-output_dir: "flux1dev_pair_slider/outputs_pair_30_eye_crop"
-slider_name: "gaze_horizontal_flux1dev_pair_30_eye_crop"
+output_dir: "flux1dev_pair_slider/outputs_pair_30_eye_geometry"
+slider_name: "gaze_horizontal_flux1dev_pair_30_eye_geometry"
 
 rank: 16
 alpha: 16
@@ -36,3 +36,9 @@ eye_crop_threshold: 0.08
 eye_crop_min_size: 192
 eye_crop_shift_jitter: 0.03
 eye_crop_scale_jitter: 0.08
+
+gaze_geometry_weight: 3.0
+gaze_darkness_gamma: 4.0
+gaze_center_threshold: 0.05
+gaze_center_min_fraction: 0.7
+gaze_direction_weight: 0.8

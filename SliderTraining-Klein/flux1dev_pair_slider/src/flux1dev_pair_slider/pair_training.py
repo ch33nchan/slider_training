@@ -247,6 +247,98 @@ def weighted_latent_mse(pred: torch.Tensor, target: torch.Tensor, weights: Optio
     return weighted.sum() / denom
 
 
+def predict_clean_latent(noisy_latent: torch.Tensor, model_output: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
+    return noisy_latent - sigma.to(device=model_output.device, dtype=model_output.dtype) * model_output
+
+
+def decode_vae_latents(vae: AutoencoderKL, latent: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    scaled = latent / vae.config.scaling_factor + vae.config.shift_factor
+    image = vae.decode(scaled.to(device=vae.device, dtype=dtype), return_dict=False)[0]
+    return (image.float() / 2.0 + 0.5).clamp_(0.0, 1.0)
+
+
+def grayscale_image(image_tensor: torch.Tensor) -> torch.Tensor:
+    return (
+        0.299 * image_tensor[:, 0:1] +
+        0.587 * image_tensor[:, 1:2] +
+        0.114 * image_tensor[:, 2:3]
+    )
+
+
+def split_eye_masks(mask_tensor: torch.Tensor, threshold: float) -> list[torch.Tensor]:
+    mask_2d = mask_tensor[0]
+    ys, xs = torch.where(mask_2d > threshold)
+    if xs.numel() == 0 or ys.numel() == 0:
+        return [mask_tensor]
+    split_x = 0.5 * float(xs.min().item() + xs.max().item())
+    width = mask_2d.shape[1]
+    x_coords = torch.arange(width, device=mask_tensor.device, dtype=mask_tensor.dtype)[None, :]
+    left_mask = mask_2d * (x_coords <= split_x)
+    right_mask = mask_2d * (x_coords > split_x)
+    masks: list[torch.Tensor] = []
+    for candidate in (left_mask, right_mask):
+        if float(candidate.sum().item()) > 1e-4:
+            masks.append(candidate.unsqueeze(0))
+    return masks if masks else [mask_tensor]
+
+
+def horizontal_darkness_center(
+    image_tensor: torch.Tensor,
+    mask_tensor: torch.Tensor,
+    darkness_gamma: float,
+) -> torch.Tensor:
+    gray = grayscale_image(image_tensor)
+    mask = mask_tensor.unsqueeze(0).to(device=image_tensor.device, dtype=image_tensor.dtype)
+    darkness = (1.0 - gray).clamp_(0.0, 1.0).pow(darkness_gamma)
+    weights = darkness * mask
+    width = image_tensor.shape[-1]
+    x_coords = torch.linspace(-1.0, 1.0, width, device=image_tensor.device, dtype=image_tensor.dtype).view(1, 1, 1, width)
+    denom = weights.sum(dim=(2, 3)).clamp_min(1e-6)
+    return (weights * x_coords).sum(dim=(2, 3)) / denom
+
+
+def compute_gaze_geometry_loss(
+    pred_image: torch.Tensor,
+    target_tensor: torch.Tensor,
+    src_tensor: torch.Tensor,
+    mask_tensor: Optional[torch.Tensor],
+    cfg,
+) -> torch.Tensor:
+    if mask_tensor is None:
+        return pred_image.new_tensor(0.0)
+
+    target_image = ((target_tensor.unsqueeze(0).to(device=pred_image.device, dtype=pred_image.dtype) / 2.0) + 0.5).clamp_(0.0, 1.0)
+    src_image = ((src_tensor.unsqueeze(0).to(device=pred_image.device, dtype=pred_image.dtype) / 2.0) + 0.5).clamp_(0.0, 1.0)
+    mask_device = mask_tensor.to(device=pred_image.device, dtype=pred_image.dtype)
+    eye_masks = split_eye_masks(mask_device, threshold=float(cfg.get("gaze_center_threshold", 0.05)))
+    darkness_gamma = float(cfg.get("gaze_darkness_gamma", 3.5))
+    min_fraction = float(cfg.get("gaze_center_min_fraction", 0.65))
+    direction_weight = float(cfg.get("gaze_direction_weight", 0.5))
+
+    total_loss = pred_image.new_tensor(0.0)
+    active_masks = 0
+    for eye_mask in eye_masks:
+        pred_center = horizontal_darkness_center(pred_image, eye_mask, darkness_gamma)
+        target_center = horizontal_darkness_center(target_image, eye_mask, darkness_gamma)
+        src_center = horizontal_darkness_center(src_image, eye_mask, darkness_gamma)
+        pred_shift = pred_center - src_center
+        target_shift = target_center - src_center
+        shift_loss = F.l1_loss(pred_shift, target_shift)
+
+        if direction_weight > 0.0:
+            target_sign = torch.sign(target_shift.detach())
+            min_signed_shift = target_shift.detach().abs() * min_fraction
+            direction_loss = F.relu(min_signed_shift - pred_shift * target_sign).mean()
+            shift_loss = shift_loss + direction_weight * direction_loss
+
+        total_loss = total_loss + shift_loss
+        active_masks += 1
+
+    if active_masks == 0:
+        return pred_image.new_tensor(0.0)
+    return total_loss / float(active_masks)
+
+
 def normalize_to(reference: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     ref_norm = reference.float().norm().clamp_min(1e-6)
     target_norm = target.float().norm().clamp_min(1e-6)
@@ -481,6 +573,7 @@ def train_pair_slider(config_path: str, flux_repo: Optional[str] = None) -> None
         optimizer.zero_grad(set_to_none=True)
         loss_value = 0.0
         bg_weight = float(cfg.get("bg_preserve_weight", 0.0))
+        geometry_weight = float(cfg.get("gaze_geometry_weight", 0.0))
 
         network.set_lora_slider(1.0)
         with network:
@@ -499,6 +592,19 @@ def train_pair_slider(config_path: str, flux_repo: Optional[str] = None) -> None
         loss_fwd = weighted_latent_mse(pred_fwd_delta, target_fwd_delta, token_weights)
         if bg_weight > 0 and bg_weights is not None:
             loss_fwd = loss_fwd + bg_weight * weighted_latent_mse(pred_fwd, src_pred_base, bg_weights)
+        geometry_fwd_value = 0.0
+        if geometry_weight > 0.0 and mask_tensor is not None:
+            pred_fwd_clean = predict_clean_latent(x_src, pred_fwd, sigma)
+            pred_fwd_image = decode_vae_latents(vae, pred_fwd_clean, dtype)
+            geometry_fwd = compute_gaze_geometry_loss(
+                pred_image=pred_fwd_image,
+                target_tensor=pos_tensor,
+                src_tensor=src_tensor,
+                mask_tensor=mask_tensor,
+                cfg=cfg,
+            )
+            loss_fwd = loss_fwd + geometry_weight * geometry_fwd
+            geometry_fwd_value = float(geometry_fwd.detach().item())
         (0.5 * loss_fwd).backward()
         loss_value += 0.5 * float(loss_fwd.detach().item())
 
@@ -519,13 +625,29 @@ def train_pair_slider(config_path: str, flux_repo: Optional[str] = None) -> None
         loss_bwd = weighted_latent_mse(pred_bwd_delta, target_bwd_delta, token_weights)
         if bg_weight > 0 and bg_weights is not None:
             loss_bwd = loss_bwd + bg_weight * weighted_latent_mse(pred_bwd, src_pred_base, bg_weights)
+        geometry_bwd_value = 0.0
+        if geometry_weight > 0.0 and mask_tensor is not None:
+            pred_bwd_clean = predict_clean_latent(x_src, pred_bwd, sigma)
+            pred_bwd_image = decode_vae_latents(vae, pred_bwd_clean, dtype)
+            geometry_bwd = compute_gaze_geometry_loss(
+                pred_image=pred_bwd_image,
+                target_tensor=neg_tensor,
+                src_tensor=src_tensor,
+                mask_tensor=mask_tensor,
+                cfg=cfg,
+            )
+            loss_bwd = loss_bwd + geometry_weight * geometry_bwd
+            geometry_bwd_value = float(geometry_bwd.detach().item())
         (0.5 * loss_bwd).backward()
         loss_value += 0.5 * float(loss_bwd.detach().item())
 
         optimizer.step()
 
         losses.append(loss_value)
-        progress.set_postfix(loss=f"{loss_value:.6f}")
+        progress.set_postfix(
+            loss=f"{loss_value:.6f}",
+            geo=f"{0.5 * (geometry_fwd_value + geometry_bwd_value):.4f}",
+        )
 
         if (step + 1) % int(cfg.sample_every) == 0:
             weight_path = weight_dir / f"flux-{cfg.slider_name}_{step + 1:06d}.safetensors"
