@@ -789,15 +789,14 @@ def train_pair_slider(
             target_delta = target_pred - src_pred_base
             pred_delta = pred - src_pred_base
 
-            latent_target_loss = weighted_latent_mse(pred_delta, target_delta, None)
+            latent_target_weights = eye_weights if eye_weights is not None else None
+            latent_target_loss = weighted_latent_mse(pred_delta, target_delta, latent_target_weights)
             eye_region_recon_loss = pred.new_tensor(0.0)
-            if eye_weights is not None:
-                eye_region_recon_loss = float(cfg.get("eye_region_weight", 0.0)) * weighted_latent_mse(pred_delta, target_delta, eye_weights)
             non_eye_preserve_loss = pred.new_tensor(0.0)
             if bg_weights is not None:
                 non_eye_preserve_loss = float(cfg.get("non_eye_preserve_weight", cfg.get("bg_preserve_weight", 0.0))) * weighted_latent_mse(pred, src_pred_base, bg_weights)
 
-            total_loss = latent_target_loss + eye_region_recon_loss + non_eye_preserve_loss
+            total_loss = latent_target_loss + non_eye_preserve_loss
             geometry_loss = pred.new_tensor(0.0)
             if gaze_loss_module is not None:
                 pred_clean = predict_clean_latent(x_src, pred, sigma)
