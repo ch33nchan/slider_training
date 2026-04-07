@@ -17,8 +17,8 @@ slider_name: "gaze_horizontal_flux1dev_columbia_l2cs"
 rank: 16
 alpha: 16
 train_method: "xattn"
-lr: 0.0005
-max_train_steps: 4000
+lr: 0.0001
+max_train_steps: 6000
 sample_every: 500
 eta: 1.0
 
@@ -27,20 +27,20 @@ logit_mean: 0.0
 logit_std: 1.0
 mode_scale: 1.29
 
-eye_region_weight: 2.0
-non_eye_region_weight: 0.05
-non_eye_preserve_weight: 0.5
-bg_preserve_weight: 0.5
+eye_region_weight: 4.0
+non_eye_region_weight: 0.01
+non_eye_preserve_weight: 1.5
+bg_preserve_weight: 1.5
 
-train_eye_crop_only: false
-eye_crop_padding: 4.0
+train_eye_crop_only: true
+eye_crop_padding: 3.0
 eye_crop_threshold: 0.08
 eye_crop_min_size: 192
 eye_crop_shift_jitter: 0.0
 eye_crop_scale_jitter: 0.0
 
-gaze_geometry_weight: 5.0
-gaze_direction_weight: 0.8
+gaze_geometry_weight: 1.0
+gaze_direction_weight: 0.25
 l2cs_model_path: "models/l2cs/l2cs_resnet50_gaze360.pth"
 l2cs_num_bins: 90
 l2cs_angle_min_deg: -42.0
